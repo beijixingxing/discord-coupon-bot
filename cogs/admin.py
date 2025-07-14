@@ -41,15 +41,21 @@ class Admin(commands.Cog):
 
             @discord.ui.button(label="确认删除", style=discord.ButtonStyle.danger)
             async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+                # 优化：在处理前禁用所有按钮，防止重复点击
+                for item in self.children:
+                    item.disabled = True
+                await interaction.response.edit_message(view=self)
                 self.value = True
                 self.stop()
-                await interaction.response.defer()
 
             @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
             async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+                # 优化：在处理前禁用所有按钮
+                for item in self.children:
+                    item.disabled = True
+                await interaction.response.edit_message(view=self)
                 self.value = False
                 self.stop()
-                await interaction.response.defer()
 
         view = ConfirmationView()
         
@@ -62,10 +68,7 @@ class Admin(commands.Cog):
 
         await view.wait()
 
-        for item in view.children:
-            item.disabled = True
-        await ctx.edit(view=view)
-
+        # 按钮已在回调中被禁用，这里只需要根据结果更新消息
         if view.value is True:
             success, message = await self.bot.db_manager.delete_project(project)
             if success:
@@ -166,6 +169,10 @@ class Admin(commands.Cog):
 
         # 仅处理本 Cog 内部的权限检查错误
         if isinstance(error, commands.CheckFailure):
+            logger.warning(
+                f"用户 {ctx.author.id} ({ctx.author.name}) "
+                f"因缺少 '{ADMIN_ROLE_NAME}' 角色而无法执行命令 '{ctx.command.qualified_name}'。"
+            )
             message = "🚫 您没有权限使用此命令。请确保您拥有 '管理组' 角色。"
             try:
                 if ctx.interaction.response.is_done():
