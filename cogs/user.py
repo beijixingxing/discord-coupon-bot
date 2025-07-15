@@ -14,7 +14,7 @@ class User(commands.Cog):
     @commands.slash_command(name="库存", description="查询一个项目的可用兑换券数量。")
     async def stock(self, ctx, project: Option(str, "要查询库存的项目。", autocomplete=project_autocompleter)): # <<< 已修正
         
-        await ctx.defer(ephemeral=False) # 让所有用户都能看到库存
+        await ctx.defer(ephemeral=True) # 仅自己可见
         
         count = await self.bot.db_manager.get_stock(project)
         if count is None:
@@ -43,8 +43,9 @@ class User(commands.Cog):
                 description=f"这是您的专属兑换券代码 (仅您可见)：\n\n**`{coupon_code}`**",
                 color=discord.Color.green()
             )
-            footer_text = f"申领自: {ctx.guild.name}" if ctx.guild else "通过私信申领"
-            embed.set_footer(text=footer_text)
+            # 优化：由于 interaction_check 确保了命令总是在服务器中执行，
+            # 因此 ctx.guild 不会为 None，可以直接使用。
+            embed.set_footer(text=f"申领自: {ctx.guild.name}")
             await ctx.followup.send(embed=embed, ephemeral=True)
 
         elif status == 'BANNED':
