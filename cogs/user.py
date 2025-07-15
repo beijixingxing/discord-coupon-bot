@@ -43,8 +43,9 @@ class User(commands.Cog):
                 description=f"这是您的专属兑换券代码 (仅您可见)：\n\n**`{coupon_code}`**",
                 color=discord.Color.green()
             )
-            footer_text = f"申领自: {ctx.guild.name}" if ctx.guild else "通过私信申领"
-            embed.set_footer(text=footer_text)
+            # 优化：由于 interaction_check 确保了命令总是在服务器中执行，
+            # 因此 ctx.guild 不会为 None，可以直接使用。
+            embed.set_footer(text=f"申领自: {ctx.guild.name}")
             await ctx.followup.send(embed=embed, ephemeral=True)
 
         elif status == 'BANNED':

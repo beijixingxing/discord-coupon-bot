@@ -24,19 +24,16 @@ async def project_autocompleter(ctx: discord.AutocompleteContext) -> List[str]:
 
 class CouponBot(discord.Bot):
     def __init__(self, *args, **kwargs):
-        # 核心修正：在调用父类构造函数之前，从 kwargs 中安全地提取 guild_ids
-        # 这样可以确保我们能拿到这个列表，而不用关心父类的内部实现
-        guild_ids = kwargs.get('guild_ids', None)
-
-        # 现在调用父类构造函数，它会用我们传入的 kwargs 进行初始化
+        # 首先，调用父类的构造函数，让它处理所有 discord.py 相关的初始化。
+        # main.py 传递的 `debug_guilds` 会被正确处理。
         super().__init__(*args, **kwargs)
-    
+
+        # 在父类初始化后，`self.debug_guilds` 属性就会被设置。
+        # 我们用它来初始化我们自己的受信任服务器列表，这比手动解析 kwargs 更健壮。
+        self.trusted_guilds: Set[int] = set(self.debug_guilds) if self.debug_guilds else set()
+
         self.db_manager = DatabaseManager()
         self.project_cache: List[str] = []
-    
-        # 使用我们之前提取的 guild_ids 列表来设置 trusted_guilds
-        # 这样就避免了 timing issue 和 AttributeError
-        self.trusted_guilds: Set[int] = set(guild_ids) if guild_ids else set()
 
         self.load_cogs()
         self.update_project_cache.start()
@@ -56,7 +53,11 @@ class CouponBot(discord.Bot):
                 if interaction.command:
                     command_name = interaction.command.qualified_name
               
-                logger.warning(f"已阻止来自未授权服务器 {interaction.guild.id} ({interaction.guild.name}) 的命令 '{command_name}'。")
+                logger.warning(
+                    f"已阻止来自未授权服务器 {interaction.guild.id} ({interaction.guild.name}) "
+                    f"的用户 {interaction.user.id} ({interaction.user.name}) "
+                    f"执行命令 '{command_name}'。"
+                )
                 await interaction.response.send_message("❌ 此机器人未被授权在此服务器上运行。", ephemeral=True)
                 return False
       
@@ -98,7 +99,11 @@ class CouponBot(discord.Bot):
         logger.info("机器人已就绪。缓存更新循环启动。")
 
     async def on_ready(self):
-        logger.info(f'以 {self.user} ({self.user.id}) 的身份登录成功')
+        if self.user:
+            logger.info(f'以 {self.user} ({self.user.id}) 的身份登录成功')
+        else:
+            logger.info("机器人已登录，但用户信息不可用。")
         logger.info('------')
         await self.db_manager.connect()
+        # 关键修复：`update_project_cache` 是一个异步任务，需要被 await
         await self.update_project_cache()
