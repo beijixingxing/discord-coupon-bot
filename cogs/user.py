@@ -14,7 +14,7 @@ class User(commands.Cog):
     @commands.slash_command(name="库存", description="查询一个项目的可用兑换券数量。")
     async def stock(self, ctx, project: Option(str, "要查询库存的项目。", autocomplete=project_autocompleter)): # <<< 已修正
         
-        await ctx.defer(ephemeral=False) # 让所有用户都能看到库存
+        await ctx.defer(ephemeral=True) # 仅自己可见
         
         count = await self.bot.db_manager.get_stock(project)
         if count is None:
