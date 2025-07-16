@@ -19,9 +19,23 @@ logger = logging.getLogger('main')
 # --- 初始化 ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
-# <<< 优化: 从 .env 文件安全地读取受信任的服务器ID
 GUILD_ID_STR = os.getenv('TRUSTED_GUILD_ID')
+ADMIN_IDS_STR = os.getenv('ADMIN_USER_IDS')
+
 DEBUG_GUILDS = [int(GUILD_ID_STR)] if GUILD_ID_STR and GUILD_ID_STR.isdigit() else None
+
+# 解析管理员ID
+ADMIN_USER_IDS = set()
+if ADMIN_IDS_STR:
+    try:
+        ADMIN_USER_IDS = {int(uid.strip()) for uid in ADMIN_IDS_STR.split(',') if uid.strip().isdigit()}
+    except ValueError:
+        logger.critical("ADMIN_USER_IDS 格式错误，请确保是由逗号分隔的纯数字ID。")
+        exit(1)
+
+if not ADMIN_USER_IDS:
+    logger.critical("ADMIN_USER_IDS 在 .env 文件中未配置或格式错误。机器人无法启动，因为没有管理员。")
+    exit(1)
 
 # --- 主程序，带自动重连 ---
 async def main():
@@ -40,9 +54,15 @@ async def main():
     intents.presences = False
     cache_flags = discord.MemberCacheFlags.none()
 
+    logger.info(f"已加载 {len(ADMIN_USER_IDS)} 个管理员ID。")
+
     while True:
-        # <<< 关键修正: 将 debug_guilds 参数传递给机器人实例
-        bot = CouponBot(intents=intents, member_cache_flags=cache_flags, debug_guilds=DEBUG_GUILDS)
+        bot = CouponBot(
+            intents=intents, 
+            member_cache_flags=cache_flags, 
+            debug_guilds=DEBUG_GUILDS,
+            admin_user_ids=ADMIN_USER_IDS  # 传递管理员ID列表
+        )
         try:
             logger.info("正在尝试连接到 Discord...")
             await bot.start(TOKEN)

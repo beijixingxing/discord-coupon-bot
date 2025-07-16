@@ -1,5 +1,5 @@
 import os
-from datetime import datetime, timedelta, timezone # timezone 依然需要，但只在初始化时用
+from datetime import datetime, timedelta
 import logging
 from typing import List, Tuple, Optional
 
@@ -85,8 +85,11 @@ class DatabaseManager:
             return result.scalars().all()
 
     async def set_project_setting(self, project_name: str, key: str, value) -> bool:
-        if key not in ['is_claim_active', 'claim_cooldown_hours']:
+        # 优化：动态检查key是否是Project模型的有效属性，而不是硬编码
+        if not hasattr(Project, key):
+            logger.warning(f"尝试设置一个不存在的项目属性: '{key}'")
             return False
+            
         async with AsyncSessionLocal() as session:
             stmt = update(Project).where(Project.name == project_name).values({key: value})
             result = await session.execute(stmt)
@@ -94,14 +97,19 @@ class DatabaseManager:
             return result.rowcount > 0
 
     async def delete_project(self, project_name: str) -> Tuple[bool, str]:
+        # 优化：在单个会话中完成查询和删除，避免调用 self.get_project 导致的额外查询
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                project_to_delete = await self.get_project(project_name)
+                stmt = select(Project).filter_by(name=project_name)
+                result = await session.execute(stmt)
+                project_to_delete = result.scalar_one_or_none()
+
                 if not project_to_delete:
                     return False, f"未找到项目 '{project_name}'。"
                 
+                # SQLAlchemy 会自动处理通过 relationship 设置的 cascade delete
                 await session.delete(project_to_delete)
-            return True, f"项目 '{project_name}' 已被成功删除。"
+            return True, f"项目 '{project_name}' 及其所有关联数据已被成功删除。"
 
     # <<< 封禁函数的逻辑已完全修正
     async def ban_user(self, user_id: int, project_name: Optional[str], reason: str, duration_hours: Optional[int]) -> Tuple[bool, str]:
@@ -223,7 +231,11 @@ class DatabaseManager:
                         m, _ = divmod(r, 60)
                         return 'COOLDOWN', (f"{h}小时 {m}分钟", last_claim.code)
 
-                # <<< 已移除 with_for_update()，这是正确的
+                # 优化说明：
+                # 这里的 SELECT -> UPDATE 模式在 SQLite 中是安全的，因为 aiosqlite 在执行事务时
+                # 会对整个数据库文件加锁，从而防止了并发场景下的竞态条件。
+                # 然而，如果未来将数据库后端更换为 PostgreSQL 或 MySQL 等支持行级锁的系统，
+                # 此处可能需要改为使用 `SELECT ... FOR UPDATE` 或更复杂的原子操作来保证并发安全。
                 claimable_coupon_stmt = select(Coupon).where(
                     Coupon.project_id == project.id,
                     Coupon.is_claimed == False
@@ -243,4 +255,3 @@ class DatabaseManager:
 
         logger.error(f"claim_coupon 函数意外地执行到了末尾而没有返回任何值。User: {user_id}, Project: {project_name}")
         return 'ERROR', "数据库处理时发生未知错误，请联系管理员。"
-

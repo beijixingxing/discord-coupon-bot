@@ -1,16 +1,12 @@
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, Option
-from bot import project_autocompleter # <<< 已修正
+from utils import project_autocompleter, is_admin
 from typing import Optional
 import logging
 
 logger = logging.getLogger('cog.admin')
 
-# --- Constants ---
-ADMIN_ROLE_NAME = "管理组"
-
-# --- Cog Class ---
 class Admin(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -18,7 +14,7 @@ class Admin(commands.Cog):
     admin = SlashCommandGroup(
         "管理",
         "兑换券机器人管理命令",
-        checks=[commands.has_role(ADMIN_ROLE_NAME).predicate]
+        checks=[is_admin()]  # 使用新的基于用户ID的检查
     )
 
     # --- Project Management Commands ---
@@ -171,9 +167,9 @@ class Admin(commands.Cog):
         if isinstance(error, commands.CheckFailure):
             logger.warning(
                 f"用户 {ctx.author.id} ({ctx.author.name}) "
-                f"因缺少 '{ADMIN_ROLE_NAME}' 角色而无法执行命令 '{ctx.command.qualified_name}'。"
+                f"因不具备管理员权限而无法执行命令 '{ctx.command.qualified_name}'。"
             )
-            message = "🚫 您没有权限使用此命令。请确保您拥有 '管理组' 角色。"
+            message = "🚫 您没有权限使用此命令。"
             try:
                 if ctx.interaction.response.is_done():
                     await ctx.followup.send(message, ephemeral=True)

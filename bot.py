@@ -2,6 +2,7 @@ import discord
 import os
 import logging
 import traceback
+import yaml  # 导入 PyYAML
 from discord.ext import tasks, commands
 from database import DatabaseManager
 from typing import List, Set
@@ -9,29 +10,14 @@ from typing import List, Set
 logger = logging.getLogger('bot')
 
 
-async def project_autocompleter(ctx: discord.AutocompleteContext) -> List[str]:
-    try:
-        query = ctx.value.lower()
-        cached_projects: List[str] = ctx.bot.project_cache
-        
-        if not query:
-            return cached_projects[:25]
-
-        return [p for p in cached_projects if query in p.lower()][:25]
-    except Exception as e:
-        logger.error(f"项目自动补全时出错: {e}")
-        return []
-
 class CouponBot(discord.Bot):
     def __init__(self, *args, **kwargs):
-        # 首先，调用父类的构造函数，让它处理所有 discord.py 相关的初始化。
-        # main.py 传递的 `debug_guilds` 会被正确处理。
+        # 从 kwargs 中提取我们自己的参数，然后将其余的传递给父类
+        self.admin_user_ids: Set[int] = kwargs.pop('admin_user_ids', set())
+        
         super().__init__(*args, **kwargs)
 
-        # 在父类初始化后，`self.debug_guilds` 属性就会被设置。
-        # 我们用它来初始化我们自己的受信任服务器列表，这比手动解析 kwargs 更健壮。
         self.trusted_guilds: Set[int] = set(self.debug_guilds) if self.debug_guilds else set()
-
         self.db_manager = DatabaseManager()
         self.project_cache: List[str] = []
 
@@ -65,21 +51,43 @@ class CouponBot(discord.Bot):
         return True
 
     def load_cogs(self):
-        cogs_dir = './cogs'
-        if not os.path.isdir(cogs_dir):
-            logger.warning(f"Cogs 目录 '{cogs_dir}' 未找到，将跳过加载。")
+        """根据 config.yml 文件加载模块。"""
+        config_path = 'config.yml'
+        if not os.path.exists(config_path):
+            logger.critical(f"配置文件 '{config_path}' 未找到。机器人无法加载任何模块。")
             return
-            
-        for filename in os.listdir(cogs_dir):
-            if filename.endswith('.py') and not filename.startswith('__'):
-                try:
-                    self.load_extension(f'cogs.{filename[:-3]}')
-                    logger.info(f'成功加载模块: {filename}')
-                except Exception as e:
-                    logger.error(f'加载模块 {filename} 失败: {e}', exc_info=True)
 
-    def cog_unload(self):
-        self.update_project_cache.cancel()
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+        except (yaml.YAMLError, IOError) as e:
+            logger.critical(f"读取或解析配置文件 '{config_path}' 失败: {e}", exc_info=True)
+            return
+
+        if 'cogs' not in config or not isinstance(config['cogs'], list):
+            logger.warning(f"配置文件 '{config_path}' 格式不正确或缺少 'cogs' 列表。")
+            return
+
+        logger.info("--- 开始根据配置文件加载模块 ---")
+        for cog_config in config['cogs']:
+            name = cog_config.get('name')
+            enabled = cog_config.get('enabled', False)
+
+            if not name:
+                logger.warning("在配置文件中发现一个没有 'name' 的模块条目，已跳过。")
+                continue
+
+            if enabled:
+                try:
+                    self.load_extension(f'cogs.{name}')
+                    logger.info(f"✅ 模块 '{name}' 已成功加载。")
+                except commands.ExtensionNotFound:
+                    logger.error(f"❌ 模块 '{name}' 加载失败：未找到 cogs/{name}.py 文件。")
+                except Exception as e:
+                    logger.error(f"❌ 模块 '{name}' 加载失败: {e}", exc_info=True)
+            else:
+                logger.info(f"⚪️ 模块 '{name}' 在配置中被禁用，已跳过。")
+        logger.info("--- 模块加载完成 ---")
 
     async def on_error(self, event_method: str, *args, **kwargs):
         logger.error(f"发生未处理的全局错误 (事件: {event_method}):\n{traceback.format_exc()}")
@@ -105,5 +113,6 @@ class CouponBot(discord.Bot):
             logger.info("机器人已登录，但用户信息不可用。")
         logger.info('------')
         await self.db_manager.connect()
-        # 关键修复：`update_project_cache` 是一个异步任务，需要被 await
-        await self.update_project_cache()
+        # 优化：移除多余的缓存更新调用。
+        # update_project_cache 任务已在 __init__ 中通过 .start() 启动，
+        # 其 before_loop 会确保在机器人就绪后自动运行第一次。

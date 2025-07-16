@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord.commands import Option
-from bot import project_autocompleter # <<< 已修正
+from utils import project_autocompleter
 import logging
 
 logger = logging.getLogger('cog.user')
