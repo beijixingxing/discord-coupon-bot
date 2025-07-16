@@ -31,3 +31,7 @@ cleanup_commands.py
 # 忽略 IDE/编辑器特定文件
 .vscode/
 .idea/
+
+# 忽略持久化数据和备份
+data/
+backups/

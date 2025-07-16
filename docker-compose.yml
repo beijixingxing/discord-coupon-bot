@@ -13,8 +13,10 @@ services:
     # 请确保您的 .env 文件和 docker-compose.yml 在同一目录下
     volumes:
       - ./.env:/app/.env
-      # 将数据库文件也挂载出来，防止容器重建时数据丢失
-      - ./coupon_bot.db:/app/coupon_bot.db
+      # 挂载一个专用的数据目录，用于存放数据库等持久化文件
+      - ./data:/app/data
+      # 挂载备份目录
+      - ./backups:/app/backups
     # <<< 新增：资源限制配置
     deploy:
       resources:

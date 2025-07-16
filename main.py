@@ -20,8 +20,9 @@ logger = logging.getLogger('main')
 load_dotenv()
 TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 # <<< 优化: 从 .env 文件安全地读取受信任的服务器ID
-GUILD_ID_STR = os.getenv('TRUSTED_GUILD_ID')
-DEBUG_GUILDS = [int(GUILD_ID_STR)] if GUILD_ID_STR and GUILD_ID_STR.isdigit() else None
+# 处理多个服务器ID的情况
+GUILD_IDS_STR = os.getenv('TRUSTED_GUILDS')
+DEBUG_GUILDS = [int(gid.strip()) for gid in GUILD_IDS_STR.split(',')] if GUILD_IDS_STR else None
 
 # --- 主程序，带自动重连 ---
 async def main():

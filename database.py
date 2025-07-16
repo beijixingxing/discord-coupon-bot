@@ -1,5 +1,6 @@
 import os
-from datetime import datetime, timedelta, timezone # timezone 依然需要，但只在初始化时用
+import glob
+from datetime import datetime, timedelta, timezone
 import logging
 from typing import List, Tuple, Optional
 
@@ -13,15 +14,26 @@ from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger('database')
 
+# --- 全新、稳健的数据库路径配置 ---
+# 容器内的数据目录路径，与 docker-compose.yml 中定义的一致
+DATA_DIR = "/app/data"
 DB_FILE = "coupon_bot.db"
+DB_PATH = os.path.join(DATA_DIR, DB_FILE)
 
-def get_db_path() -> str:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(script_dir, DB_FILE)
+# 确保数据目录在容器内存在
+os.makedirs(DATA_DIR, exist_ok=True)
 
-DATABASE_URL = f"sqlite+aiosqlite:///{get_db_path()}"
+DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
+# --- 路径配置结束 ---
+
 Base = declarative_base()
-async_engine = create_async_engine(DATABASE_URL)
+async_engine = create_async_engine(
+    DATABASE_URL,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
+    pool_recycle=3600
+)
 AsyncSessionLocal = sessionmaker(
     bind=async_engine, class_=AsyncSession, expire_on_commit=False
 )
@@ -42,6 +54,7 @@ class Coupon(Base):
     is_claimed = Column(Boolean, nullable=False, default=False)
     claimed_by = Column(Integer)
     claimed_at = Column(DateTime)
+    expiry_date = Column(DateTime, nullable=True)
     project_id = Column(Integer, ForeignKey("projects.id", ondelete="CASCADE"), nullable=False)
     project = relationship("Project", back_populates="coupons")
 
@@ -133,7 +146,7 @@ class DatabaseManager:
             
             scope_text = f"项目 '{project_name}'" if project_name else "全局"
             duration_text = f"{duration_hours} 小时" if duration_hours else "永久"
-            full_message = f"{message} 范围: {scope_text}, 时长: {duration_text}。"
+            full_message = f"{message} 范围: {scope_text}, 时长: {duration_text}, 理由: {reason}"
             return True, full_message
 
     async def unban_user(self, user_id: int, project_name: Optional[str]) -> Tuple[bool, str]:
@@ -155,7 +168,7 @@ class DatabaseManager:
             else:
                 return False, f"该用户未被 {scope_text} 封禁。"
 
-    async def add_coupons(self, project_name: str, codes: List[str]) -> Optional[Tuple[int, int]]:
+    async def add_coupons(self, project_name: str, codes: List[str], expiry_days: Optional[int] = None) -> Optional[Tuple[int, int, List[str]]]:
         async with AsyncSessionLocal() as session:
             project = await self.get_project(project_name)
             if not project:
@@ -165,8 +178,9 @@ class DatabaseManager:
             result = await session.execute(existing_codes_stmt)
             existing_codes = set(result.scalars().all())
 
+            expiry_date = (datetime.utcnow() + timedelta(days=expiry_days)) if expiry_days else None
             new_coupons = [
-                Coupon(code=code, project_id=project.id)
+                Coupon(code=code, project_id=project.id, expiry_date=expiry_date)
                 for code in codes if code not in existing_codes
             ]
 
@@ -174,7 +188,7 @@ class DatabaseManager:
                 session.add_all(new_coupons)
                 await session.commit()
 
-            return len(new_coupons), len(codes) - len(new_coupons)
+            return len(new_coupons), len(codes) - len(new_coupons), [c.code for c in new_coupons]
 
     async def get_stock(self, project_name: str) -> Optional[int]:
         async with AsyncSessionLocal() as session:
@@ -182,17 +196,61 @@ class DatabaseManager:
             if not project:
                 return None
             
+            current_time = datetime.utcnow()
             stmt = select(func.count(Coupon.id)).where(
                 Coupon.project_id == project.id,
-                Coupon.is_claimed == False
-            )
+                Coupon.is_claimed == False,
+                (Coupon.expiry_date.is_(None) | (Coupon.expiry_date > current_time)))
             result = await session.execute(stmt)
             return result.scalar_one()
 
+    async def cleanup_expired_coupons(self) -> int:
+        """清理所有过期的兑换券"""
+        async with AsyncSessionLocal() as session:
+            current_time = datetime.utcnow()
+            stmt = delete(Coupon).where(
+                Coupon.expiry_date.is_not(None),
+                Coupon.expiry_date <= current_time
+            )
+            result = await session.execute(stmt)
+            await session.commit()
+            return result.rowcount
+
+    async def backup_database(self) -> bool:
+        """执行数据库备份"""
+        backup_dir = os.path.join(os.path.dirname(__file__), '../backups')
+        os.makedirs(backup_dir, exist_ok=True)
+      
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M')
+        backup_path = os.path.join(backup_dir, f'coupon_bot_{timestamp}.db')
+      
+        try:
+            # 暂停写入操作
+            async with self.engine.connect() as conn:
+                await conn.exec_driver_sql("BEGIN IMMEDIATE")
+                await conn.exec_driver_sql(f"VACUUM INTO '{backup_path}'")
+                await conn.commit()
+          
+            # 清理旧备份（保留最近5个）
+            backups = sorted(glob.glob(os.path.join(backup_dir, '*.db')), key=os.path.getmtime)
+            for old_backup in backups[:-5]:
+                os.remove(old_backup)
+              
+            return True
+        except Exception as e:
+            logger.error(f"数据库备份失败: {e}")
+            return False
+
+    async def get_coupon_details(self, code: str) -> Optional[Coupon]:
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(select(Coupon).filter_by(code=code))
+            return result.scalar_one_or_none()
+
     async def claim_coupon(self, user_id: int, project_name: str) -> Tuple[str, Optional[any]]:
+        current_time = datetime.utcnow()
         async with AsyncSessionLocal() as session:
             async with session.begin():
-                current_time = datetime.utcnow() # <<< 统一使用 utcnow()
+                current_time = datetime.utcnow()
 
                 project_result = await session.execute(select(Project).filter_by(name=project_name))
                 project = project_result.scalar_one_or_none()
@@ -223,11 +281,17 @@ class DatabaseManager:
                         m, _ = divmod(r, 60)
                         return 'COOLDOWN', (f"{h}小时 {m}分钟", last_claim.code)
 
-                # <<< 已移除 with_for_update()，这是正确的
-                claimable_coupon_stmt = select(Coupon).where(
-                    Coupon.project_id == project.id,
-                    Coupon.is_claimed == False
-                ).limit(1)
+                # 正确的链式调用，使用括号包裹整个语句
+                claimable_coupon_stmt = (
+                    select(Coupon)
+                    .where(
+                        Coupon.project_id == project.id,
+                        Coupon.is_claimed == False,
+                        (Coupon.expiry_date.is_(None) | (Coupon.expiry_date > current_time)),
+                    )
+                    .order_by(Coupon.expiry_date.asc())
+                    .limit(1)
+                )
                 
                 coupon_result = await session.execute(claimable_coupon_stmt)
                 coupon_to_claim = coupon_result.scalar_one_or_none()
@@ -237,7 +301,7 @@ class DatabaseManager:
                 
                 coupon_to_claim.is_claimed = True
                 coupon_to_claim.claimed_by = user_id
-                coupon_to_claim.claimed_at = current_time # <<< 统一使用 utcnow()
+                coupon_to_claim.claimed_at = current_time
                 
                 return 'SUCCESS', coupon_to_claim.code
 
