@@ -1,7 +1,0 @@
-py-cord
-python-dotenv
-SQLAlchemy
-aiosqlite
-PyNaCl
-openai>=1.0.0
-psutil>=5.9.0
