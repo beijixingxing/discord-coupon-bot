@@ -1,0 +1,37 @@
+# 忽略 Python 缓存文件
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 忽略操作系统生成的文件
+.DS_Store
+Thumbs.db
+
+# 忽略虚拟环境
+venv/
+.venv/
+env/
+.env/
+
+# 忽略敏感配置文件
+# .env 文件包含机器人令牌和服务器ID，绝不能上传
+.env
+
+# 忽略数据库文件
+# coupon_bot.db 是 SQLite 数据库文件，包含所有项目和券码数据
+*.db
+*.sqlite
+*.sqlite3
+
+# 忽略一次性脚本
+# cleanup_commands.py 是一个一次性维护脚本，不应成为项目的一部分
+cleanup_commands.py
+
+# 忽略 IDE/编辑器特定文件
+.vscode/
+.idea/
+
+# 忽略持久化数据和备份
+data/
+backups/
