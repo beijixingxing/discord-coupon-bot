@@ -1,0 +1,11 @@
+# 机器人模块（Cogs）加载配置
+# 通过将 'enabled' 设置为 true 或 false 来启用或禁用特定功能模块。
+# name: 必须与 cogs/ 目录下的文件名（不含.py）完全匹配。
+
+cogs:
+  - name: "admin"
+    enabled: true
+  - name: "user"
+    enabled: true
+  - name: "status"
+    enabled: true
