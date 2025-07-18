@@ -100,33 +100,37 @@ class CouponBot(discord.Bot):
 
     async def on_application_command_error(self, ctx: discord.ApplicationContext, error: discord.DiscordException):
         """全局处理所有应用命令的错误。"""
-        # 解包由命令调用引起的原始错误
+        # 关键步骤：首先解包被包装的原始错误
+        # ApplicationCommandInvokeError 是 CommandInvokeError 的子类
         if isinstance(error, commands.errors.CommandInvokeError):
-            error = error.original
-      
-        # 已知且可忽略的错误：当用户取消交互或交互超时
-        if isinstance(error, discord.errors.NotFound) and error.code == 10062:
+            original_error = error.original
+        else:
+            original_error = error
+
+        # 现在，使用解包后的原始错误进行判断
+        if isinstance(original_error, discord.errors.NotFound) and original_error.code == 10062:
             logger.debug(f"交互 '{ctx.command.qualified_name}' 已被用户取消或超时，已忽略。")
-            return
+            return # 直接返回，不再执行后续的错误记录和用户提示
 
         # 如果错误已经在特定Cog的处理器中处理过，则不再执行
         if ctx.command and ctx.command.has_error_handler():
             return
 
-        # 记录所有未被处理的未知错误
+        # 记录所有其他未被处理的未知错误
         logger.error(
             f"命令 '{ctx.command.qualified_name if ctx.command else '未知命令'}' "
-            f"发生未捕获的错误: {error}",
-            exc_info=error
+            f"发生未捕获的错误: {error}", # 记录原始的、完整的错误
+            exc_info=error # 传递完整的异常信息以便追踪
         )
-      
+    
         # 向用户发送一个统一的、临时的错误消息
         error_message = "❌ 执行此命令时发生了一个未知的内部错误。管理员已收到通知。"
         try:
-            if ctx.interaction.response.is_done():
-                await ctx.followup.send(error_message, ephemeral=True)
-            else:
+            if not ctx.interaction.response.is_done():
                 await ctx.respond(error_message, ephemeral=True)
+            else:
+                # 如果已经响应过（例如，defer成功了但后续代码失败），则使用 followup
+                await ctx.followup.send(error_message, ephemeral=True)
         except discord.errors.NotFound:
             # 如果此时交互也失效了，就放弃发送消息
             pass
