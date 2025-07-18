@@ -94,7 +94,7 @@ class User(commands.Cog):
             )
             embed.add_field(name="您上次领取的兑换券", value=f"`{last_code}`", inline=False)
             embed.add_field(name="该券状态", value=last_expiry_info, inline=False)
-            await ctx.followup.send(embed=embed)
+            await ctx.followup.send(embed=embed, ephemeral=True)
         elif status == 'NO_STOCK':
             await ctx.followup.send(f"抱歉，项目 **{project}** 的所有兑换券都已被申领完毕。", ephemeral=True)
         elif status == 'NO_PROJECT':
