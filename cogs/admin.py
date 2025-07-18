@@ -1,7 +1,7 @@
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, Option
-from utils import project_autocompleter, is_admin
+from utils import project_autocompleter
 from typing import Optional
 import logging
 import io
@@ -15,10 +15,15 @@ class Admin(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    # 将 is_admin() 检查应用于此 Cog 中的所有命令
+    def cog_check(self, ctx: discord.ApplicationContext) -> bool:
+        # 从 bot 实例中获取在启动时加载的管理员ID列表
+        admin_ids = getattr(ctx.bot, 'admin_user_ids', set())
+        return ctx.author.id in admin_ids
+
     admin = SlashCommandGroup(
         "管理",
-        "兑换券机器人管理命令",
-        checks=[is_admin()]
+        "兑换券机器人管理命令"
     )
 
     # --- Project Management Commands ---
@@ -73,6 +78,7 @@ class Admin(commands.Cog):
             success, message = await self.bot.db_manager.delete_project(project)
             if success:
                 await self.bot.update_project_cache() # 立即更新缓存
+                self.bot.invalidate_stock_cache(project) # << 缓存失效
                 await ctx.edit(content=f"✅ {message}", view=None)
             else:
                 await ctx.edit(content=f"❌ {message}", view=None)
@@ -137,6 +143,7 @@ class Admin(commands.Cog):
             if result is None:
                 final_message = f"❌ 未找到项目 '{project}'。"
             else:
+                self.bot.invalidate_stock_cache(project) # << 缓存失效
                 newly_added, duplicates, _ = result
                 file_type_msg = f"{processed_files_count} 个 .txt 文件" if filename.endswith('.zip') else ".txt 文件"
               

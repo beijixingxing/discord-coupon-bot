@@ -2,11 +2,12 @@ import discord
 import os
 import logging
 import traceback
+import time
 import yaml  # 导入 PyYAML
 from datetime import datetime
 from discord.ext import tasks, commands
 from database import DatabaseManager
-from typing import List, Set
+from typing import List, Set, Dict, Tuple, Any
 
 logger = logging.getLogger('bot')
 
@@ -21,6 +22,7 @@ class CouponBot(discord.Bot):
         self.trusted_guilds: Set[int] = set(self.debug_guilds) if self.debug_guilds else set()
         self.db_manager = DatabaseManager()
         self.project_cache: List[str] = []
+        self.stock_cache: Dict[str, Tuple[int, float]] = {}  # 项目名 -> (库存, 时间戳)
 
         self.load_cogs()
 
@@ -96,6 +98,41 @@ class CouponBot(discord.Bot):
     async def on_error(self, event_method: str, *args, **kwargs):
         logger.error(f"发生未处理的全局错误 (事件: {event_method}):\n{traceback.format_exc()}")
 
+    async def on_application_command_error(self, ctx: discord.ApplicationContext, error: discord.DiscordException):
+        """全局处理所有应用命令的错误。"""
+        # 解包由命令调用引起的原始错误
+        if isinstance(error, commands.errors.CommandInvokeError):
+            error = error.original
+      
+        # 已知且可忽略的错误：当用户取消交互或交互超时
+        if isinstance(error, discord.errors.NotFound) and error.code == 10062:
+            logger.debug(f"交互 '{ctx.command.qualified_name}' 已被用户取消或超时，已忽略。")
+            return
+
+        # 如果错误已经在特定Cog的处理器中处理过，则不再执行
+        if ctx.command and ctx.command.has_error_handler():
+            return
+
+        # 记录所有未被处理的未知错误
+        logger.error(
+            f"命令 '{ctx.command.qualified_name if ctx.command else '未知命令'}' "
+            f"发生未捕获的错误: {error}",
+            exc_info=error
+        )
+      
+        # 向用户发送一个统一的、临时的错误消息
+        error_message = "❌ 执行此命令时发生了一个未知的内部错误。管理员已收到通知。"
+        try:
+            if ctx.interaction.response.is_done():
+                await ctx.followup.send(error_message, ephemeral=True)
+            else:
+                await ctx.respond(error_message, ephemeral=True)
+        except discord.errors.NotFound:
+            # 如果此时交互也失效了，就放弃发送消息
+            pass
+        except Exception as e:
+            logger.error(f"在向用户报告错误时，又发生了新的错误: {e}", exc_info=True)
+          
     @tasks.loop(minutes=5)
     async def update_project_cache(self):
         try:
@@ -144,9 +181,32 @@ class CouponBot(discord.Bot):
             count = await self.db_manager.cleanup_expired_coupons()
             if count > 0:
                 logger.info(f"已清理 {count} 张过期兑换券")
+                self.stock_cache.clear() # 清理所有缓存
         except Exception as e:
             logger.error(f"清理过期兑换券失败: {e}")
 
     @cleanup_expired_coupons.before_loop
     async def before_cleanup(self):
         await self.wait_until_ready()
+
+    # --- 缓存控制 ---
+    async def get_cached_stock(self, project_name: str, cache_duration: int = 60) -> int:
+        """获取项目库存，优先使用缓存。"""
+        current_time = time.time()
+        if project_name in self.stock_cache:
+            stock, timestamp = self.stock_cache[project_name]
+            if current_time - timestamp < cache_duration:
+                logger.debug(f"库存缓存命中: {project_name}")
+                return stock
+
+        logger.debug(f"库存缓存未命中或已过期: {project_name}")
+        stock = await self.db_manager.get_stock(project_name)
+        if stock is not None:
+            self.stock_cache[project_name] = (stock, current_time)
+        return stock
+
+    def invalidate_stock_cache(self, project_name: str):
+        """使指定项目的库存缓存失效。"""
+        if project_name in self.stock_cache:
+            del self.stock_cache[project_name]
+            logger.info(f"项目 '{project_name}' 的库存缓存已失效。")

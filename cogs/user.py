@@ -45,7 +45,7 @@ class User(commands.Cog):
         
         await ctx.defer() # 公开可见
         
-        count = await self.bot.db_manager.get_stock(project)
+        count = await self.bot.get_cached_stock(project)
         if count is None:
             await ctx.followup.send(f"❌ 未找到项目 '{project}'。", delete_after=10) # 公开错误消息
             return
@@ -66,6 +66,7 @@ class User(commands.Cog):
         status, data = await self.bot.db_manager.claim_coupon(user_id, project)
 
         if status == 'SUCCESS':
+            self.bot.invalidate_stock_cache(project) # << 缓存失效
             coupon_code, expiry_date = data
             expiry_info = _format_relative_expiry(expiry_date)
             

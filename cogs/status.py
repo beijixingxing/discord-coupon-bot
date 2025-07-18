@@ -50,7 +50,7 @@ class Status(commands.Cog):
         }
         
         # 获取API状态
-        api_status, api_details = await self.get_detailed_api_status()
+        api_info = await self.get_detailed_api_status() # <<< 获取结构化数据
         
         # 创建状态面板
         embed = discord.Embed(
@@ -88,15 +88,21 @@ class Status(commands.Cog):
             inline=False
         )
         
-        # API状态
+        # API状态 (现在更健壮)
+        api_value = (
+            f"状态: {api_info['status']}\n"
+            f"端点: {self.api_config['OPENAI_API_BASE'] or '未配置'}\n"
+        )
+        if api_info.get('latency_ms') is not None:
+            api_value += f"延迟: {api_info['latency_ms']:.2f} ms\n"
+        if self.api_config['OPENAI_MODEL_NAME']:
+            api_value += f"使用模型: '{self.api_config['OPENAI_MODEL_NAME']}'\n"
+        if api_info.get('error'):
+            api_value += f"详情: {api_info['error']}"
+
         embed.add_field(
             name="🔗 星星人民公益站 API 状态",
-            value=(
-                f"状态: {api_status}\n"
-                f"端点: {self.api_config['OPENAI_API_BASE']}\n"
-                f"延迟: {api_details.split('延迟: ')[1].split(' ms')[0]} ms\n"
-                f"使用模型: '{self.api_config['OPENAI_MODEL_NAME']}'"
-            ),
+            value=api_value,
             inline=False
         )
         
@@ -116,22 +122,24 @@ class Status(commands.Cog):
         except Exception as e:
             logger.error(f"删除状态消息失败: {str(e)}")
 
-    async def get_detailed_api_status(self):
+    async def get_detailed_api_status(self) -> dict:
         if not self.is_api_configured or not self.openai_client:
-            return "⚠️ 未配置", "未在 `.env` 文件中提供完整的API配置"
-      
+            return {"status": "⚠️ 未配置"}
+    
         start_time = time.time()
         try:
             await self.openai_client.models.list(timeout=10)
             latency = (time.time() - start_time) * 1000
-            status_text = "✅ 连接正常"
-            details = f"• 端点: {self.api_config['OPENAI_API_BASE']}\n" \
-                     f"• 延迟: {latency:.2f} ms\n" \
-                     f"• 模型: {self.api_config['OPENAI_MODEL_NAME']}"
-            return status_text, details
+            return {
+                "status": "✅ 连接正常",
+                "latency_ms": latency,
+            }
         except Exception as e:
             logger.error(f"API检查错误: {str(e)}")
-            return "❌ 连接失败", f"错误: {str(e)}"
+            return {
+                "status": "❌ 连接失败",
+                "error": str(e)
+            }
 
 def setup(bot):
     bot.add_cog(Status(bot))

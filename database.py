@@ -1,5 +1,6 @@
 import os
 import glob
+import sqlite3 # <<< 导入标准库 sqlite3
 from datetime import datetime, timedelta
 import logging
 from typing import List, Tuple, Optional
@@ -282,27 +283,34 @@ class DatabaseManager:
 
     async def backup_database(self) -> bool:
         """执行数据库备份"""
-        backup_dir = os.path.join(os.path.dirname(__file__), '../backups')
+        # 使用 /app/backups 确保路径在容器内是绝对且正确的
+        backup_dir = '/app/backups'
         os.makedirs(backup_dir, exist_ok=True)
-      
+    
         timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M')
         backup_path = os.path.join(backup_dir, f'coupon_bot_{timestamp}.db')
-      
+    
         try:
-            # 暂停写入操作
+            # 这是执行SQLite在线备份最安全、最推荐的方式
             async with self.engine.connect() as conn:
-                await conn.exec_driver_sql("BEGIN IMMEDIATE")
-                await conn.exec_driver_sql(f"VACUUM INTO '{backup_path}'")
-                await conn.commit()
-          
+                await conn.run_sync(
+                    lambda sync_conn: sync_conn.backup(sqlite3.connect(backup_path))
+                )
+        
             # 清理旧备份（保留最近5个）
             backups = sorted(glob.glob(os.path.join(backup_dir, '*.db')), key=os.path.getmtime)
-            for old_backup in backups[:-5]:
-                os.remove(old_backup)
-              
+            if len(backups) > 5:
+                for old_backup in backups[:-5]:
+                    try:
+                        os.remove(old_backup)
+                    except OSError as e:
+                        logger.error(f"清理旧备份文件 {old_backup} 失败: {e}")
+
+            logger.info(f"数据库已成功备份到 {backup_path}")
             return True
         except Exception as e:
-            logger.error(f"数据库备份失败: {e}")
+            # 至关重要：使用 exc_info=True 来记录完整的错误堆栈
+            logger.error(f"数据库备份失败: {e}", exc_info=True)
             return False
 
     async def get_coupon_details(self, code: str) -> Optional[Coupon]:
