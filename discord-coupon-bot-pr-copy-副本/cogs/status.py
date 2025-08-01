@@ -27,14 +27,14 @@ class Status(commands.Cog):
                     api_key=self.api_config['OPENAI_API_KEY'],
                     base_url=self.api_config['OPENAI_API_BASE']
                 )
-                logger.info("星星人民公益站 API 客户端已成功初始化。")
+                logger.info("公益站 API 客户端已成功初始化。")
             except Exception as e:
                 logger.error(f"初始化 API 客户端失败: {str(e)}")
                 self.openai_client = None
                 self.is_api_configured = False
         else:
             self.openai_client = None
-            logger.warning("未提供完整的【星星人民公益站 API】配置，相关状态检查将被跳过。")
+            logger.warning("未提供完整的【公益站 API】配置，相关状态检查将被跳过。")
         
         self.process = psutil.Process(os.getpid())
 
@@ -93,7 +93,7 @@ class Status(commands.Cog):
             api_value += f"详情: {api_info['error']}"
 
         embed.add_field(
-            name="🔗 星星人民公益站 API 状态",
+            name="🔗 公益站 API 状态",
             value=api_value,
             inline=False
         )
