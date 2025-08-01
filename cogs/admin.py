@@ -1,14 +1,29 @@
 import discord
 from discord.ext import commands
 from discord.commands import SlashCommandGroup, Option
-from utils import project_autocompleter
+from utils import project_autocompleter, EmbedFactory
 from typing import Optional
 import logging
 import io
 import zipfile
 from datetime import datetime, timezone
+import re
+from constants import ERROR_COLOR, SUCCESS_COLOR
 
 logger = logging.getLogger('cog.admin')
+
+async def cog_autocompleter(ctx: discord.AutocompleteContext) -> list[str]:
+    """为已加载的 cogs 提供自动补全。"""
+    # self.bot.extensions 的键是 'cogs.admin', 'cogs.autoreply' 等
+    # 我们只需要 'admin', 'autoreply' 这部分
+    loaded_cogs = [
+        name.split('.')[-1] for name in ctx.bot.extensions
+        if name.startswith('cogs.')
+    ]
+    return [
+        cog for cog in loaded_cogs
+        if cog.lower().startswith(ctx.value.lower())
+    ]
 
 # --- Cog Class ---
 class Admin(commands.Cog):
@@ -26,210 +41,279 @@ class Admin(commands.Cog):
         "兑换券机器人管理命令"
     )
 
-    # --- Project Management Commands ---
-    @admin.command(name="创建项目", description="创建一个新的兑换券项目。")
-    async def create_project(self, ctx, name: Option(str, "新项目的名称。")):
-        success, message = await self.bot.db_manager.create_project(name)
-        if success:
-            await ctx.respond(f"✅ {message}", ephemeral=True)
-            await self.bot.update_project_cache() # 立即更新缓存
-        else:
-            await ctx.respond(f"❌ {message}", ephemeral=True)
+    async def find_user(self, interaction: discord.Interaction, user_input: str) -> Optional[discord.User]:
+        """
+        根据用户ID或'用户名#识别号'查找用户。
+        优化逻辑：优先通过ID进行全局查找，然后才在服务器内部按名称查找。
+        """
+        user: Optional[discord.User] = None
 
-    @admin.command(name="删除项目", description="永久删除一个项目及其所有数据（危险操作！）。")
-    async def delete_project(self, ctx, project: Option(str, "要永久删除的项目。", autocomplete=project_autocompleter)): # <<< 已修正
-      
-        class ConfirmationView(discord.ui.View):
-            def __init__(self):
-                super().__init__(timeout=30.0)
-                self.value = None
-
-            @discord.ui.button(label="确认删除", style=discord.ButtonStyle.danger)
-            async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
-                # 优化：在处理前禁用所有按钮，防止重复点击
-                for item in self.children:
-                    item.disabled = True
-                await interaction.response.edit_message(view=self)
-                self.value = True
-                self.stop()
-
-            @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
-            async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
-                # 优化：在处理前禁用所有按钮
-                for item in self.children:
-                    item.disabled = True
-                await interaction.response.edit_message(view=self)
-                self.value = False
-                self.stop()
-
-        view = ConfirmationView()
+        # 1. 优先尝试通过ID进行全局查找 (bot.fetch_user)
+        if re.match(r'^\d{17,20}$', user_input):
+            try:
+                user = await self.bot.fetch_user(int(user_input))
+            except discord.NotFound:
+                # 如果全局都找不到这个ID，那它就是无效的
+                await interaction.followup.send(f"❌ 未能通过ID `{user_input}` 找到任何 Discord 用户。", ephemeral=True)
+                return None
+            except discord.HTTPException as e:
+                logger.error(f"通过全局ID获取用户时发生HTTP错误: {e}")
+                await interaction.followup.send("🚫 查询用户时发生网络错误，请稍后再试。", ephemeral=True)
+                return None
         
-        await ctx.respond(
-            f"**⚠️ 警告：您确定要永久删除项目 `{project}` 吗？**\n"
-            f"此操作不可逆，将同时删除该项目下**所有**的兑换券和封禁记录。",
-            view=view,
-            ephemeral=True
-        )
-
-        await view.wait()
-
-        # 按钮已在回调中被禁用，这里只需要根据结果更新消息
-        if view.value is True:
-            success, message = await self.bot.db_manager.delete_project(project)
-            if success:
-                await self.bot.update_project_cache() # 立即更新缓存
-                self.bot.invalidate_stock_cache(project) # << 缓存失效
-                await ctx.edit(content=f"✅ {message}", view=None)
-            else:
-                await ctx.edit(content=f"❌ {message}", view=None)
-
-        elif view.value is False:
-            await ctx.edit(content="操作已取消。", view=None)
-      
+        # 2. 如果输入不是ID，或者ID查找失败，则尝试在当前服务器内按名称查找
         else:
-            await ctx.edit(content="操作超时，已自动取消。", view=None)
+            if not interaction.guild:
+                await interaction.followup.send("❌ 按用户名查找只能在服务器内进行。", ephemeral=True)
+                return None
+            
+            # 尝试按 "用户名#识别号" 格式查找
+            if '#' in user_input:
+                try:
+                    name, discriminator = user_input.rsplit('#', 1)
+                    user = discord.utils.get(interaction.guild.members, name=name, discriminator=discriminator)
+                except ValueError:
+                    pass # 格式不正确，忽略
+            
+            # 如果上面没找到，就尝试只按用户名/昵称模糊查找
+            if user is None:
+                # `interaction.guild.get_member_named` 是一个更方便的查找工具
+                user = interaction.guild.get_member_named(user_input)
+
+        if user is None:
+            await interaction.followup.send(f"❌ 未能在本服务器中找到用户 `{user_input}`。请检查输入是否正确。", ephemeral=True)
+            return None
+        
+        return user
+
+    # --- Project Management Modals & Views ---
+    class CreateProjectModal(discord.ui.Modal):
+        def __init__(self, admin_cog):
+            super().__init__(title="创建新项目")
+            self.admin_cog = admin_cog
+            self.add_item(discord.ui.InputText(
+                label="项目名称",
+                placeholder="请输入新项目的唯一名称。",
+                required=True
+            ))
+
+        async def callback(self, interaction: discord.Interaction):
+            project_name = self.children[0].value
+            success, message = await self.admin_cog.bot.db_manager.create_project(project_name)
+            if success:
+                await interaction.response.send_message(f"✅ {message}", ephemeral=True)
+                await self.admin_cog.bot.update_project_cache()
+            else:
+                await interaction.response.send_message(f"❌ {message}", ephemeral=True)
+
+    # --- Project Management Commands ---
+    class DeleteConfirmationView(discord.ui.View):
+        """一个用于确认删除操作的视图。"""
+        def __init__(self, admin_cog, project_name: str):
+            super().__init__(timeout=30.0)
+            self.admin_cog = admin_cog
+            self.project_name = project_name
+
+        async def _disable_and_stop(self, interaction: discord.Interaction, content: str):
+            for item in self.children:
+                item.disabled = True
+            await interaction.response.edit_message(content=content, view=self)
+            self.stop()
+
+        @discord.ui.button(label="确认删除", style=discord.ButtonStyle.danger)
+        async def confirm(self, button: discord.ui.Button, interaction: discord.Interaction):
+            await self._disable_and_stop(interaction, f"正在删除项目 **{self.project_name}**...")
+            success, message = await self.admin_cog.bot.db_manager.delete_project(self.project_name)
+            if success:
+                await self.admin_cog.bot.update_project_cache()
+                self.admin_cog.bot.invalidate_stock_cache(self.project_name)
+                await interaction.followup.send(f"✅ {message}", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ {message}", ephemeral=True)
+
+        @discord.ui.button(label="取消", style=discord.ButtonStyle.secondary)
+        async def cancel(self, button: discord.ui.Button, interaction: discord.Interaction):
+            await self._disable_and_stop(interaction, "操作已取消。")
 
     # --- Coupon Management Commands ---
-    @admin.command(name="添加兑换券", description="批量添加兑换券（支持.txt或.zip文件）。")
-    async def add_coupons(self, ctx,
-                          project: Option(str, "要添加兑换券的项目。", autocomplete=project_autocompleter),
-                          file: Option(discord.Attachment, "包含兑换券的.txt文件或包含多个.txt的.zip文件。"),
-                          expiry_days: Option(int, "兑换券有效期天数（留空则为永久）。", min_value=1, required=False)):
-      
-        await ctx.defer(ephemeral=True)
-
-        final_message = "❌ 处理时发生未知错误。" # 默认的失败消息
-
+    async def _parse_txt_file(self, file: discord.Attachment) -> list[str]:
+        """解析 .txt 文件并返回兑换码列表。"""
+        file_content_bytes = await file.read()
         try:
-            # --- 逻辑块：只负责计算结果，不与Discord交互 ---
+            content = file_content_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            try:
+                content = file_content_bytes.decode('gbk')
+                logger.warning(f"文件 '{file.filename}' 使用 GBK 编码进行解码。")
+            except UnicodeDecodeError:
+                raise ValueError(f"文件 '{file.filename}' 的编码格式不受支持，请使用 UTF-8 或 GBK 编码。")
+        return [code.strip() for code in content.splitlines() if code.strip()]
+
+    async def _parse_zip_file(self, file: discord.Attachment) -> tuple[list[str], int]:
+        """解析 .zip 文件并返回兑换码列表和处理的文件数。"""
+        all_codes = []
+        processed_files_count = 0
+        try:
+            zip_content = await file.read()
+            with zipfile.ZipFile(io.BytesIO(zip_content)) as zf:
+                for file_info in zf.infolist():
+                    if file_info.filename.lower().endswith('.txt') and not file_info.is_dir():
+                        processed_files_count += 1
+                        with zf.open(file_info) as txt_file:
+                            content = txt_file.read().decode('utf-8')
+                            codes = [code.strip() for code in content.splitlines() if code.strip()]
+                            all_codes.extend(codes)
+        except zipfile.BadZipFile:
+            raise ValueError("上传的 .zip 文件已损坏或格式不正确。")
+        return all_codes, processed_files_count
+
+    async def _process_add_coupons(self, interaction: discord.Interaction, project: str, file: discord.Attachment, expiry_days: Optional[int]):
+        """处理添加兑换券的核心逻辑。"""
+        try:
             filename = file.filename.lower()
             all_codes = []
             processed_files_count = 0
+            file_type_msg = ""
 
             if filename.endswith('.zip'):
-                try:
-                    zip_content = await file.read()
-                    with zipfile.ZipFile(io.BytesIO(zip_content)) as zf:
-                        for file_info in zf.infolist():
-                            if file_info.filename.lower().endswith('.txt') and not file_info.is_dir():
-                                processed_files_count += 1
-                                with zf.open(file_info) as txt_file:
-                                    content = txt_file.read().decode('utf-8')
-                                    codes = [code.strip() for code in content.splitlines() if code.strip()]
-                                    all_codes.extend(codes)
-                except zipfile.BadZipFile:
-                    final_message = "❌ 上传的 .zip 文件已损坏或格式不正确。"
-                    # 立即返回，不执行后续逻辑
-                    return
-          
+                all_codes, processed_files_count = await self._parse_zip_file(file)
+                file_type_msg = f"{processed_files_count} 个 .txt 文件"
             elif filename.endswith('.txt'):
+                all_codes = await self._parse_txt_file(file)
                 processed_files_count = 1
-                file_content = await file.read()
-                codes = [code.strip() for code in file_content.decode('utf-8').splitlines() if code.strip()]
-                all_codes.extend(codes)
-          
+                file_type_msg = ".txt 文件"
             else:
-                final_message = "❌ 请上传一个有效的 `.txt` 或 `.zip` 文件。"
-                # 立即返回，不执行后续逻辑
+                await interaction.followup.send("❌ 请上传一个有效的 `.txt` 或 `.zip` 文件。", ephemeral=True)
                 return
 
-            # 检查是否有有效的兑换码
             if not all_codes:
-                final_message = "🤷 文件中未找到任何有效的兑换券代码。"
+                await interaction.followup.send("🤷 文件中未找到任何有效的兑换券代码。", ephemeral=True)
                 return
 
-            # 数据库操作
             result = await self.bot.db_manager.add_coupons(project, all_codes, expiry_days)
             if result is None:
-                final_message = f"❌ 未找到项目 '{project}'。"
-            else:
-                self.bot.invalidate_stock_cache(project) # << 缓存失效
-                newly_added, duplicates, _ = result
-                file_type_msg = f"{processed_files_count} 个 .txt 文件" if filename.endswith('.zip') else ".txt 文件"
-              
-                final_message = (
-                    f"✅ **为项目 '{project}' 处理完毕！**\n"
-                    f"- **来源**: 已处理 {file_type_msg}\n"
-                    f"- **新增兑换券**: **{newly_added}**\n"
-                    f"- **忽略的重复券**: **{duplicates}**\n"
-                    f"- **总计**: **{len(all_codes)}**"
-                )
+                await interaction.followup.send(f"❌ 未找到项目 '{project}'。", ephemeral=True)
+                return
 
+            self.bot.invalidate_stock_cache(project)
+            newly_added, duplicates, _ = result
+            
+            final_message = (
+                f"✅ **为项目 '{project}' 处理完毕！**\n"
+                f"- **来源**: 已处理 {file_type_msg}\n"
+                f"- **新增兑换券**: **{newly_added}**\n"
+                f"- **忽略的重复券**: **{duplicates}**\n"
+                f"- **总计**: **{len(all_codes)}**"
+            )
+            await interaction.followup.send(final_message, ephemeral=True)
+
+        except ValueError as e:
+            await interaction.followup.send(f"❌ {str(e)}", ephemeral=True)
         except Exception as e:
             logger.error(f"处理添加兑换券命令时发生意外错误: {str(e)}", exc_info=True)
-            final_message = f"🚫 处理文件时发生了一个内部错误，请检查日志。错误: {str(e)}"
-      
-        finally:
-            # --- 响应块：唯一出口，负责与Discord交互 ---
-            try:
-                await ctx.interaction.edit_original_response(content=final_message)
-            except discord.errors.NotFound:
-                logger.warning("尝试编辑响应消息失败，可能已被用户关闭。")
-            except Exception as e:
-                logger.error(f"编辑最终响应消息时发生未知错误: {e}", exc_info=True)
+            await interaction.followup.send(f"🚫 处理文件时发生了一个内部错误，请检查日志。", ephemeral=True)
+
+    @admin.command(name="添加兑换券", description="批量添加兑换券（支持.txt或.zip文件）。")
+    async def add_coupons(self, ctx: discord.ApplicationContext,
+                          project: Option(str, "要添加兑换券的项目。", autocomplete=project_autocompleter),
+                          file: Option(discord.Attachment, "包含兑换券的.txt文件或包含多个.txt的.zip文件。"),
+                          expiry_days: Option(int, "兑换券有效期天数（留空则为永久）。", min_value=1, required=False)):
+        await ctx.defer(ephemeral=True)
+        await self._process_add_coupons(ctx.interaction, project, file, expiry_days)
 
     # --- Settings Commands ---
-    @admin.command(name="开关申领", description="为一个项目启用或禁用申领功能。")
-    async def toggle_claim(self, ctx,
-                           project: Option(str, "要修改的项目。", autocomplete=project_autocompleter), # <<< 已修正
-                           status: Option(str, "新的申领状态。", choices=["开启", "关闭"])):
-        new_status = True if status == '开启' else False
-        success = await self.bot.db_manager.set_project_setting(project, 'is_claim_active', new_status)
+    async def _process_toggle_claim(self, interaction: discord.Interaction, project_name: str, new_status: bool):
+        """处理开关申领的核心逻辑。"""
+        success = await self.bot.db_manager.set_project_setting(project_name, 'is_claim_active', new_status)
+        status_text = "开启" if new_status else "关闭"
         if success:
-            await ctx.respond(f"✅ 项目 **{project}** 的申领功能已 **{status}**。", ephemeral=True)
+            await interaction.response.send_message(f"✅ 项目 **{project_name}** 的申领功能已 **{status_text}**。", ephemeral=True)
         else:
-            await ctx.respond(f"❌ 未找到项目 '{project}'。", ephemeral=True)
+            await interaction.response.send_message(f"❌ 未找到项目 '{project_name}'。", ephemeral=True)
 
-    @admin.command(name="设置冷却", description="为一个项目设置申领冷却时间。")
-    async def set_cooldown(self, ctx,
-                           project: Option(str, "要修改的项目。", autocomplete=project_autocompleter), # <<< 已修正
-                           hours: Option(int, "冷却时间（小时）。", min_value=0)):
-        success = await self.bot.db_manager.set_project_setting(project, 'claim_cooldown_hours', hours)
+    async def _process_set_cooldown(self, interaction: discord.Interaction, project_name: str, hours: int):
+        """处理设置冷却时间的核心逻辑。"""
+        success = await self.bot.db_manager.set_project_setting(project_name, 'claim_cooldown_hours', hours)
         if success:
-            await ctx.respond(f"✅ 项目 **{project}** 的冷却时间已设置为 **{hours}** 小时。", ephemeral=True)
+            await interaction.response.send_message(f"✅ 项目 **{project_name}** 的冷却时间已设置为 **{hours}** 小时。", ephemeral=True)
         else:
-            await ctx.respond(f"❌ 未找到项目 '{project}'。", ephemeral=True)
+            await interaction.response.send_message(f"❌ 未找到项目 '{project_name}'。", ephemeral=True)
 
     # --- User Moderation Commands ---
-    @admin.command(name="封禁", description="禁止一个用户申领兑换券。")
-    async def ban(self, ctx,
-                  user: Option(discord.Member, "要封禁的用户。"),
-                  reason: Option(str, "封禁的原因。"),
-                  project: Option(str, "要封禁的项目（留空则为全局封禁）。", autocomplete=project_autocompleter, required=False), # <<< 已修正
-                  duration_hours: Option(int, "封禁时长（小时，留空则为永久）。", min_value=1, required=False)):
-        
-        success, message = await self.bot.db_manager.ban_user(user.id, project, reason, duration_hours)
-        if success:
-            embed = discord.Embed(
-                title="🚫 用户封禁公告",
-                description=f"用户 **{user.mention}** (`{user.id}`) 已被管理员 **{ctx.author.mention}** 封禁。",
-                color=discord.Color.red(),
-                timestamp=datetime.now(timezone.utc)
-            )
-            embed.add_field(name="详情", value=message, inline=False)
-            await ctx.respond(embed=embed) # 公开消息
-        else:
-            await ctx.respond(f"❌ 封禁失败。{message}", ephemeral=True) # 失败消息仍然是临时的
+    async def _process_ban_user(self, interaction: discord.Interaction, user: discord.User, reason: str, project: Optional[str], duration_hours: Optional[int]):
+        """处理用户封禁的核心逻辑。"""
+        # 确保我们有一个有效的 guild 上下文来发送公告
+        if not interaction.guild:
+            await interaction.response.send_message("❌ 此操作只能在服务器内执行。", ephemeral=True)
+            return
 
-    @admin.command(name="解封", description="解除用户的封禁。")
-    async def unban(self, ctx,
-                    user: Option(discord.Member, "要解封的用户。"),
-                    reason: Option(str, "解封的原因。"),
-                    project: Option(str, "要解封的项目（留空则为全局）。", autocomplete=project_autocompleter, required=False)):
+        success, message = await self.bot.db_manager.ban_user(user.id, project, reason, duration_hours)
         
-        success, message = await self.bot.db_manager.unban_user(user.id, project)
+        # 无论成功与否，首先响应发起操作的管理员
         if success:
-            embed = discord.Embed(
-                title="✅ 用户解封公告",
-                description=f"用户 **{user.mention}** (`{user.id}`) 的封禁已被管理员 **{ctx.author.mention}** 解除。",
-                color=discord.Color.green(),
-                timestamp=datetime.now(timezone.utc)
-            )
-            embed.add_field(name="范围", value=message, inline=False)
-            embed.add_field(name="理由", value=reason, inline=False)
-            await ctx.respond(embed=embed) # 公开消息
+            response_message = f"✅ 已成功封禁用户 **{user.display_name}**。"
+            # 如果交互尚未响应，则使用 response.send_message
+            if not interaction.response.is_done():
+                await interaction.response.send_message(response_message, ephemeral=True)
+            else: # 否则使用 followup
+                await interaction.followup.send(response_message, ephemeral=True)
         else:
-            await ctx.respond(f"❌ 解封失败。{message}", ephemeral=True) # 失败消息仍然是临时的
+            response_message = f"❌ 封禁失败: {message}"
+            if not interaction.response.is_done():
+                await interaction.response.send_message(response_message, ephemeral=True)
+            else:
+                await interaction.followup.send(response_message, ephemeral=True)
+            return # 失败则不发送公告
+
+        # 成功后，构建并发送公开的封禁公告
+        description = f"用户 **{user.mention}** (`{user.id}`) 已被管理员 **{interaction.user.mention}** 封禁。"
+        embed = EmbedFactory.error("用户封禁公告", description)
+        embed.add_field(name="详情", value=message, inline=False)
+        
+        # 尝试在原始交互频道发送公告
+        try:
+            await interaction.channel.send(embed=embed)
+        except discord.Forbidden:
+            await interaction.followup.send("⚠️ 无法在此频道发送公开的封禁公告（权限不足）。", ephemeral=True)
+        except Exception as e:
+            logger.error(f"发送封禁公告时出错: {e}", exc_info=True)
+            await interaction.followup.send("⚠️ 发送公开封禁公告时发生错误。", ephemeral=True)
+
+    async def _process_unban_user(self, interaction: discord.Interaction, user: discord.User, reason: str, project: Optional[str]):
+        """处理用户解封的核心逻辑。"""
+        if not interaction.guild:
+            await interaction.response.send_message("❌ 此操作只能在服务器内执行。", ephemeral=True)
+            return
+
+        success, message = await self.bot.db_manager.unban_user(user.id, project)
+
+        if success:
+            response_message = f"✅ 已成功解封用户 **{user.display_name}**。"
+            if not interaction.response.is_done():
+                await interaction.response.send_message(response_message, ephemeral=True)
+            else:
+                await interaction.followup.send(response_message, ephemeral=True)
+        else:
+            response_message = f"❌ 解封失败: {message}"
+            if not interaction.response.is_done():
+                await interaction.response.send_message(response_message, ephemeral=True)
+            else:
+                await interaction.followup.send(response_message, ephemeral=True)
+            return
+
+        # 成功后发送公开解封公告
+        description = f"用户 **{user.mention}** (`{user.id}`) 的封禁已被管理员 **{interaction.user.mention}** 解除。"
+        embed = EmbedFactory.success("用户解封公告", description)
+        embed.add_field(name="范围", value=message, inline=False)
+        embed.add_field(name="理由", value=reason, inline=False)
+        
+        try:
+            await interaction.channel.send(embed=embed)
+        except discord.Forbidden:
+            await interaction.followup.send("⚠️ 无法在此频道发送公开的解封公告（权限不足）。", ephemeral=True)
+        except Exception as e:
+            logger.error(f"发送解封公告时出错: {e}", exc_info=True)
+            await interaction.followup.send("⚠️ 发送公开解封公告时发生错误。", ephemeral=True)
 
     # --- Error Handler ---
     @commands.Cog.listener()

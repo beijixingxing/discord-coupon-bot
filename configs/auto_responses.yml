@@ -1,0 +1,70 @@
+# 这是一个关键词自动回复的配置文件。
+# 新结构：按频道ID或'global'对规则进行分组。
+# 组内的所有规则都将只在该频道（或全局）生效。
+
+# --- 全局规则 ---
+# 这里的规则在所有允许的频道中都生效
+# (受 config.yml 中的全局 allowed_channel_ids 限制)
+global:
+
+# --- 特定频道/子区规则 ---
+# 这里的规则只在ID为 EXAMPLE_CHANNEL_ID 的频道或子区生效
+'EXAMPLE_CHANNEL_ID':
+  rules:
+    - keywords:
+        - '示例关键词'
+        - '公益站'
+        - '机器人'
+      response: |
+        ## 欢迎使用我们的公益站！
+
+        **公益站帖子地址/自助领取额度**:
+        <https://discord.com/channels/SERVER_ID/CHANNEL_ID>
+
+        如有问题，请私信管理员。谢谢！
+      # 排除触发者ID列表，这些用户发送的消息不会触发自动回复
+      exclude_users:
+        - 123456789012345678 # 示例用户ID
+
+# --- 另一个特定频道的规则 ---
+# 这里的规则只在ID为 EXAMPLE_CHANNEL_ID_2 的频道生效
+'EXAMPLE_CHANNEL_ID_2':
+  - name: '帮助菜单触发'
+    keywords:
+      - '帮助'
+      - '兑换券机器人'
+      - '申领'
+      - '库存'
+      - '捐赠'
+    reply:
+      content: |
+        你好！我已经升级了，现在所有的功能都已集成到一个方便的UI控制面板中。
+        请直接使用 `/公益站` 命令来发送和使用全新的交互面板！
+
+  - name: '在本频道提及机器人的回复'
+    mention_target_ids:
+      - 'bot'
+    action: 'trigger_help_command'
+
+  - name: '429'
+    keywords:
+      - '429'
+    reply:
+      content: |
+        ## 原因：短时间内请求次数过于频繁。
+        ## 操作: 请等待片刻 后再试。
+        ## 此问题也可能与 main prompt被标记 相关，可一并排查"
+
+  - name: '带图片的回复示例'
+    keywords:
+      - '服务器图片'
+      - '服务器照片'
+    reply:
+      content: '这是我们服务器的最新照片！'
+      image_url: 'https://i.imgur.com/T3fpykC.png'
+
+  - name: '纯图片回复示例'
+    keywords:
+      - 'logo'
+    reply:
+      image_url: 'https://i.imgur.com/r6nSj2y.png'

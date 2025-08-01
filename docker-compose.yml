@@ -1,11 +1,9 @@
-version: '3.8'
-
 services:
   coupon-bot:
     # 构建镜像，上下文为当前目录
     build: .
     # 容器的名称
-    container_name: discord-coupon-bot
+    container_name: discord-coupon-bot-service
     # 设置重启策略
     # unless-stopped: 除非手动停止，否则容器总会自动重启
     restart: unless-stopped
@@ -13,6 +11,7 @@ services:
     # 请确保您的 .env 文件和 docker-compose.yml 在同一目录下
     volumes:
       - ./.env:/app/.env
+      # 将一个由 Docker 管理的命名卷挂载到容器的 /app/data 目录
       # 将宿主机的 ./data 目录挂载到容器的 /app/data 目录
       # 这是最直接的持久化方式，数据文件将直接出现在您的项目文件夹中
       - ./data:/app/data
@@ -29,3 +28,24 @@ services:
         reservations:
           # 启动时为它预留 64MB 内存
           memory: 64M
+    # <<< 新增：健康检查配置
+    healthcheck:
+      # test: 用来检查容器健康状态的命令
+      # python -c "..." -c 表示执行一段字符串形式的Python代码
+      # import psutil, sys; sys.exit(0 if ... else 1)
+      #   - 导入 psutil 和 sys 库
+      #   - 遍历所有正在运行的进程 (psutil.process_iter)
+      #   - 检查是否有任何一个进程的名字是 'python' (p.name() == 'python')
+      #   - any(...) 会在找到第一个匹配项后返回 True
+      #   - 如果找到了 python 进程，sys.exit(0) (表示成功/健康)
+      #   - 如果没找到，sys.exit(1) (表示失败/不健康)
+      test: ["CMD", "python", "-c", "import psutil, sys; sys.exit(0 if any(p.name() == 'python' for p in psutil.process_iter()) else 1)"]
+      # interval: 每次健康检查的间隔时间
+      interval: 30s
+      # timeout: 单次健康检查命令的超时时间
+      timeout: 10s
+      # retries: 连续多少次失败后，将容器标记为 "unhealthy"
+      retries: 3
+      # start_period: 容器启动后，等多长时间再开始第一次健康检查
+      # 这给了机器人足够的时间去初始化和连接Discord
+      start_period: 60s

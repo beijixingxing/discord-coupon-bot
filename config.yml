@@ -3,9 +3,71 @@
 # name: 必须与 cogs/ 目录下的文件名（不含.py）完全匹配。
 
 cogs:
-  - name: "admin"
+  - name: 'admin'
     enabled: true
-  - name: "user"
+  - name: 'user'
     enabled: true
-  - name: "status"
+  - name: 'status'
     enabled: true
+  - name: 'help'
+    enabled: true
+  - name: 'autoreply'
+    enabled: true
+  - name: 'donation'
+    enabled: true
+  - name: 'ui_panel'
+    enabled: true
+
+# ----------------------------------------------------
+# 机器人核心设置
+# ----------------------------------------------------
+bot_settings:
+  # 当机器人与 Discord 断开连接时，等待多少秒后尝试重连
+  reconnect_delay_seconds: 15
+  # 自动回复功能设置
+  autoreply:
+    # 自动回复的消息，在多少秒后自动删除 (设置为 0 则禁用)
+    delete_delay_seconds: 60
+    # 允许触发自动回复的频道ID列表 (留空则允许所有频道)
+    # 示例: [123456789012345678, 987654321098765432]
+    allowed_channel_ids: []
+
+  # 捐赠感谢公告设置
+  donation_announcement:
+    # 是否启用公开感谢
+    enabled: true
+
+    # 要发送感谢公告的频道ID列表（可以是服务器频道或子区）
+    channel_ids:
+      - 123456789012345678 # 示例频道ID，请替换为实际频道ID
+      - 987654321098765432 # 示例频道ID，请替换为实际频道ID
+
+    # 公告消息现在使用 Embed 格式以获得更丰富的视觉效果。
+    # 所有文本字段都支持以下占位符：
+    # {user_mention}, {user_name}, {user_display_name}, {new_count}, {duplicate_count}
+    embed:
+      title: '💖 感谢有你，星光璀璨 💖'
+      description: "**感谢 {user_mention} 为我们的公益项目注入新的能量！**\n\n您的慷慨捐赠是我们前行的最大动力，感谢您的信任与支持！"
+      color: '#FFD700' # 金色
+      thumbnail_url: 'https://img.freepik.com/free-vector/trophy-cup-with-gold-medal-ribbon_1017-10216.jpg'
+      footer:
+        text: 'Discord 机器人 | 感谢每一位贡献者'
+        icon_url: 'https://i.imgur.com/r6nSj2y.png'
+
+# ----------------------------------------------------
+# 后台任务循环设置
+# ----------------------------------------------------
+tasks:
+  # 数据库自动备份在每天的几点执行 (UTC 时间, 24小时制, 3 代表凌晨3点)
+  backup_hour_utc: 3
+  # 每隔多少小时清理一次过期的兑换券
+  cleanup_interval_hours: 1
+  # 执行数据库备份时，保留最近多少个备份文件
+  backup_retention_count: 5
+
+# ----------------------------------------------------
+# 用户体验 (UX) 设置
+# ----------------------------------------------------
+ux:
+  # /库存 和 /状态 命令发出的消息，在多少秒后自动删除 (设置为 0 则禁用)
+  message_delete_delay: 15
