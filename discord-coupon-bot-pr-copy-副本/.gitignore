@@ -1,0 +1,32 @@
+# --- Configuration ---
+# Ignore actual config files, but keep the examples.
+config.yml
+.env
+/configs/auto_responses.yml
+
+# --- Databases ---
+# Ignore database files.
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Logs ---
+# Ignore log files and directories.
+/logs/
+*.log
+
+# --- Backups ---
+# Ignore any backup directories.
+/backups/
+
+# --- Python ---
+# Ignore Python cache files.
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# --- IDE/Editor ---
+# Ignore common IDE/editor-specific files.
+.vscode/
+.idea/

@@ -1,0 +1,32 @@
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv
+venv/
+env/
+
+# IDE / Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docs
+README.md
+LICENSE
+
+# Data & Backups (these are mounted as volumes, not needed in image)
+data/
+backups/
