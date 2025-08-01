@@ -22,26 +22,24 @@ class Status(commands.Cog):
 
         if self.is_api_configured:
             try:
+                # 移除 proxies 参数，因为它在当前版本的 openai 库中不受支持
                 self.openai_client = AsyncOpenAI(
                     api_key=self.api_config['OPENAI_API_KEY'],
-                    base_url=self.api_config['OPENAI_API_BASE'],
+                    base_url=self.api_config['OPENAI_API_BASE']
                 )
-                logger.info("星星人民公益站 API 客户端已成功初始化。")
+                logger.info("公益站 API 客户端已成功初始化。")
             except Exception as e:
                 logger.error(f"初始化 API 客户端失败: {str(e)}")
                 self.openai_client = None
                 self.is_api_configured = False
         else:
             self.openai_client = None
-            logger.warning("未提供完整的【星星人民公益站 API】配置，相关状态检查将被跳过。")
+            logger.warning("未提供完整的【公益站 API】配置，相关状态检查将被跳过。")
         
         self.process = psutil.Process(os.getpid())
 
-    @commands.slash_command(name="状态", description="查看机器人和数据库状态(10秒后自动删除)")
-    async def public_status(self, ctx: discord.ApplicationContext):
-        """综合状态面板"""
-        await ctx.defer()
-        
+    async def _create_status_embed(self) -> discord.Embed:
+        """创建并返回一个包含当前状态的 Embed 对象。"""
         # 并行获取状态数据
         bot_stats = {
             'latency': f"{self.bot.latency * 1000:.2f} ms",
@@ -49,24 +47,20 @@ class Status(commands.Cog):
             'memory': f"{self.process.memory_info().rss / (1024 * 1024):.1f} MB"
         }
         
-        # 获取API状态
-        api_info = await self.get_detailed_api_status() # <<< 获取结构化数据
+        api_info = await self.get_detailed_api_status()
         
-        # 创建状态面板
         embed = discord.Embed(
             title="📊 机器人运行状态",
             color=discord.Color.green(),
             timestamp=discord.utils.utcnow()
         )
         
-        # 获取系统硬件状态
         system_cpu = f"{psutil.cpu_percent():.2f}%"
         system_mem = psutil.virtual_memory()
         system_mem_usage = f"{system_mem.percent:.2f}% ({system_mem.used/1024/1024/1024:.2f}/{system_mem.total/1024/1024/1024:.2f} GB)"
         disk = psutil.disk_usage('/')
         disk_usage = f"{disk.percent:.2f}% ({disk.used/1024/1024/1024:.2f}/{disk.total/1024/1024/1024:.2f} GB)"
 
-        # 机器人核心状态
         embed.add_field(
             name="⚙️ 机器人核心状态",
             value=(
@@ -77,7 +71,6 @@ class Status(commands.Cog):
             inline=False
         )
         
-        # 服务器硬件状态
         embed.add_field(
             name="🖥️ 服务器硬件状态",
             value=(
@@ -88,7 +81,6 @@ class Status(commands.Cog):
             inline=False
         )
         
-        # API状态 (现在更健壮)
         api_value = (
             f"状态: {api_info['status']}\n"
             f"端点: {self.api_config['OPENAI_API_BASE'] or '未配置'}\n"
@@ -101,26 +93,35 @@ class Status(commands.Cog):
             api_value += f"详情: {api_info['error']}"
 
         embed.add_field(
-            name="🔗 星星人民公益站 API 状态",
+            name="🔗 公益站 API 状态",
             value=api_value,
             inline=False
         )
         
         embed.set_footer(text=f"版本 {self.version} • 状态报告 • {time.strftime('%Y-%m-%d %H:%M', time.localtime())}")
+        return embed
+
+    @commands.slash_command(name="状态", description="查看机器人和数据库状态(10秒后自动删除)")
+    async def public_status(self, ctx: discord.ApplicationContext):
+        """综合状态面板"""
+        await ctx.defer()
         
-        # 发送并设置自动删除
+        embed = await self._create_status_embed()
         msg = await ctx.followup.send(embed=embed)
-        await asyncio.sleep(10)
-        try:
-            await msg.delete()
-        except discord.NotFound:
-            logger.debug("状态消息已被手动删除")
-        except discord.Forbidden:
-            logger.error("删除消息权限不足，请确保机器人有'管理消息'权限")
-        except discord.HTTPException as e:
-            logger.error(f"Discord API错误: {e.status} {e.text}", exc_info=True)
-        except Exception as e:
-            logger.error(f"删除状态消息失败: {str(e)}")
+        
+        delay = self.bot.config.get('ux', {}).get('message_delete_delay', 10)
+        if delay > 0:
+            await asyncio.sleep(delay)
+            try:
+                await msg.delete()
+            except discord.NotFound:
+                logger.debug("状态消息已被手动删除")
+            except discord.Forbidden:
+                logger.error("删除消息权限不足，请确保机器人有'管理消息'权限")
+            except discord.HTTPException as e:
+                logger.error(f"Discord API错误: {e.status} {e.text}", exc_info=True)
+            except Exception as e:
+                logger.error(f"删除状态消息失败: {str(e)}")
 
     async def get_detailed_api_status(self) -> dict:
         if not self.is_api_configured or not self.openai_client:
