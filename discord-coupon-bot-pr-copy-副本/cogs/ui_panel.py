@@ -20,23 +20,18 @@ class DonationModal(discord.ui.Modal):
         ))
 
     async def callback(self, interaction: discord.Interaction):
+        # 首先 defer，因为后续操作可能耗时
         await interaction.response.defer(ephemeral=True, thinking=True)
-        
+
         donation_cog = self.bot.get_cog('Donation')
-        if not donation_cog or not hasattr(donation_cog, '_process_donation'):
+        if not donation_cog or not hasattr(donation_cog, 'process_text_donation'):
             await interaction.followup.send("❌ 捐赠功能当前不可用，请联系管理员。", ephemeral=True)
             return
-            
-        # 从输入框获取文本并解析
+
         raw_text = self.children[0].value
-        keys = donation_cog._parse_raw_text(raw_text)
-        
-        try:
-            result_embed = await donation_cog._process_donation(interaction, keys)
-            await interaction.followup.send(embed=result_embed, ephemeral=True)
-        except Exception as e:
-            logger.error(f"处理捐赠模态框时出错: {e}", exc_info=True)
-            await interaction.followup.send("🚫 处理您的捐赠时发生了一个未知的内部错误。", ephemeral=True)
+        # 现在，我们只调用公开的接口，将交互和原始文本传递过去
+        # followup 和错误处理都由 process_text_donation 内部完成
+        await donation_cog.process_text_donation(interaction, raw_text)
 
 
 class SetCooldownModal(discord.ui.Modal):
@@ -294,13 +289,19 @@ class CogSelect(discord.ui.Select):
 
     async def callback(self, interaction: discord.Interaction):
         cog_name = self.values[0]
+        cog_object = self.bot.get_cog(cog_name)
+
+        if not cog_object:
+            await interaction.response.send_message(f"❌ 内部错误：无法找到名为 {cog_name} 的模块实例。", ephemeral=True)
+            return
+
+        module_path = cog_object.__module__
         try:
-            # 重载cog
-            self.bot.reload_extension(f'cogs.{cog_name.lower()}')
-            await interaction.response.send_message(f"✅ 模块 {cog_name} 已成功重载。", ephemeral=True)
+            self.bot.reload_extension(module_path)
+            await interaction.response.send_message(f"✅ 模块 **{cog_name}** (`{module_path}`) 已成功重载。", ephemeral=True)
         except Exception as e:
-            logger.error(f"重载模块 {cog_name} 时出错: {e}", exc_info=True)
-            await interaction.response.send_message(f"❌ 重载模块 {cog_name} 时发生错误。", ephemeral=True)
+            logger.error(f"重载模块 {cog_name} ({module_path}) 时出错: {e}", exc_info=True)
+            await interaction.response.send_message(f"❌ 重载模块 **{cog_name}** 时发生错误。", ephemeral=True)
 
 class CogSelectView(discord.ui.View):
     def __init__(self, bot: discord.Bot):
@@ -328,6 +329,8 @@ class UnifiedAdminActionSelect(discord.ui.Select):
             discord.SelectOption(label="解封用户", value="unban_user", emoji="✅", description="解除用户的封禁。"),
             discord.SelectOption(label="重载模块", value="reload_cog", emoji="⚙️", description="重载一个功能模块（Cog）。"),
             discord.SelectOption(label="立即备份", value="backup_now", emoji="💾", description="立即手动触发一次数据库备份。"),
+            discord.SelectOption(label="增量导出密钥", value="export_new_keys", emoji="📤", description="导出上次导出后新增的密钥。"),
+            discord.SelectOption(label="全量导出密钥", value="export_all_keys", emoji="📦", description="导出所有有效的密钥。"),
         ]
         super().__init__(placeholder="请选择一项管理操作...", min_values=1, max_values=1, options=options)
 
@@ -345,6 +348,8 @@ class UnifiedAdminActionSelect(discord.ui.Select):
             "unban_user": "解封用户",
             "reload_cog": "重载模块",
             "backup_now": "立即备份",
+            "export_new_keys": "增量导出密钥",
+            "export_all_keys": "全量导出密钥",
         }
         action_text = action_map.get(action, action)
 
@@ -381,6 +386,22 @@ class UnifiedAdminActionSelect(discord.ui.Select):
                 await interaction.followup.send(msg, ephemeral=True)
             else:
                 await interaction.followup.send("❌ 备份功能不可用。", ephemeral=True)
+        
+        elif action == "export_new_keys":
+            await interaction.response.send_message(
+                "🔑 **增量导出密钥**\n"
+                "请使用以下命令来导出**自上次导出以来**所有新增的有效密钥：\n"
+                "```/管理 导出密钥 模式:新增```",
+                ephemeral=True
+            )
+        
+        elif action == "export_all_keys":
+            await interaction.response.send_message(
+                "📦 **全量导出密钥**\n"
+                "请使用以下命令来导出**所有**有效的密钥：\n"
+                "```/管理 导出密钥 模式:全部```",
+                ephemeral=True
+            )
 
 class MainPanelView(discord.ui.View):
     def __init__(self, bot: discord.Bot):
@@ -389,7 +410,21 @@ class MainPanelView(discord.ui.View):
         # 注意：所有按钮都由下面的 @discord.ui.button 装饰器自动添加，
         # 此处不再需要手动调用 self.add_item()。
 
-    @discord.ui.button(label="📦 查看库存", style=discord.ButtonStyle.primary, custom_id="btn_view_inventory", row=0)
+    @discord.ui.button(label="🎟️ 领兑换券", style=discord.ButtonStyle.success, custom_id="btn_claim_coupon", row=0)
+    async def claim_coupon_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
+        projects = self.bot.project_cache
+        if not projects:
+            await interaction.response.send_message("当前没有可供申领的项目。", ephemeral=True)
+            return
+        view = ClaimView(self.bot, projects)
+        await interaction.response.send_message("请选择要申领的项目：", view=view, ephemeral=True)
+
+    @discord.ui.button(label="💎 捐赠密钥", style=discord.ButtonStyle.blurple, custom_id="btn_donate_keys", row=0)
+    async def donate_keys_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
+        view = DonationTypeView(self.bot)
+        await interaction.response.send_message("请选择捐赠方式：", view=view, ephemeral=True)
+
+    @discord.ui.button(label="📦 查看库存", style=discord.ButtonStyle.primary, custom_id="btn_view_inventory", row=1)
     async def view_inventory_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
         user_cog = self.bot.get_cog('User')
         if user_cog and hasattr(user_cog, '_show_inventory'):
@@ -400,32 +435,6 @@ class MainPanelView(discord.ui.View):
                 await interaction.response.send_message("❌ 查看库存时发生错误。", ephemeral=True)
         else:
             await interaction.response.send_message("❌ 查看库存功能当前不可用。", ephemeral=True)
-
-    @discord.ui.button(label="🎟️ 申领兑换券", style=discord.ButtonStyle.success, custom_id="btn_claim_coupon", row=0)
-    async def claim_coupon_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
-        projects = self.bot.project_cache
-        if not projects:
-            await interaction.response.send_message("当前没有可供申领的项目。", ephemeral=True)
-            return
-        view = ClaimView(self.bot, projects)
-        await interaction.response.send_message("请选择要申领的项目：", view=view, ephemeral=True)
-
-    @discord.ui.button(label="📜 我的记录", style=discord.ButtonStyle.secondary, custom_id="btn_my_records", row=0)
-    async def my_records_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
-        user_cog = self.bot.get_cog('User')
-        if user_cog and hasattr(user_cog, '_process_my_claims'):
-            try:
-                await user_cog._process_my_claims(interaction)
-            except Exception as e:
-                logger.error(f"查看记录时出错: {e}", exc_info=True)
-                await interaction.response.send_message("❌ 查看记录时发生错误。", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ 查看记录功能当前不可用。", ephemeral=True)
-
-    @discord.ui.button(label="💎 捐赠密钥", style=discord.ButtonStyle.blurple, custom_id="btn_donate_keys", row=1)
-    async def donate_keys_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
-        view = DonationTypeView(self.bot)
-        await interaction.response.send_message("请选择捐赠方式：", view=view, ephemeral=True)
 
     @discord.ui.button(label="❓ 获取帮助", style=discord.ButtonStyle.primary, custom_id="btn_get_help", row=1)
     async def get_help_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -441,7 +450,19 @@ class MainPanelView(discord.ui.View):
         else:
             await interaction.response.send_message("❌ 帮助功能当前不可用。", ephemeral=True)
 
-    @discord.ui.button(label="⚙️ 管理面板", style=discord.ButtonStyle.danger, custom_id="btn_admin_panel", row=1)
+    @discord.ui.button(label="📜 我的记录", style=discord.ButtonStyle.secondary, custom_id="btn_my_records", row=2)
+    async def my_records_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
+        user_cog = self.bot.get_cog('User')
+        if user_cog and hasattr(user_cog, '_process_my_claims'):
+            try:
+                await user_cog._process_my_claims(interaction)
+            except Exception as e:
+                logger.error(f"查看记录时出错: {e}", exc_info=True)
+                await interaction.response.send_message("❌ 查看记录时发生错误。", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ 查看记录功能当前不可用。", ephemeral=True)
+
+    @discord.ui.button(label="⚙️ 管理面板", style=discord.ButtonStyle.danger, custom_id="btn_admin_panel", row=2)
     async def admin_panel_callback(self, button: discord.ui.Button, interaction: discord.Interaction):
         # 检查用户是否为管理员
         if not hasattr(self.bot, 'is_admin') or not await self.bot.is_admin(interaction.user):
@@ -465,9 +486,14 @@ class UIPanel(commands.Cog):
         """
         await ctx.defer(ephemeral=True)
 
+        # 从配置加载 Embed 内容，如果配置不存在则使用默认值
+        panel_config = self.bot.config.get('ux', {}).get('panel_embed', {})
+        title = panel_config.get('title', "✨ 公益站控制面板 ✨")
+        description = panel_config.get('description', "欢迎使用公益站机器人！请通过下方的按钮与我进行交互。")
+
         embed = discord.Embed(
-            title="✨ 公益站控制面板 ✨",
-            description="欢迎使用公益站机器人！请通过下方的按钮与我进行交互。",
+            title=title,
+            description=description,
             color=discord.Color.from_rgb(114, 137, 218)  # Discord Blurple
         )
         

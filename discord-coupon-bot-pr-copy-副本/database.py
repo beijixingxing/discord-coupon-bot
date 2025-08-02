@@ -21,8 +21,9 @@ from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger('database')
 
-# 定义容器内数据存储的绝对路径
-DATA_DIR = "/app/data"
+# 从环境变量读取数据目录，如果未设置，则默认为当前工作目录下的 'data' 文件夹
+# 这使得在本地开发和 Docker 部署中都能灵活配置
+DATA_DIR = os.getenv('DATA_DIR', 'data')
 DB_FILE = "coupon_bot.db"
 DB_PATH = os.path.join(DATA_DIR, DB_FILE)
 
@@ -73,7 +74,8 @@ class GeminiKey(Base):
     key = Column(String, nullable=False, unique=True, index=True)
     donator_user_id = Column(Integer, nullable=False, index=True)
     donated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    is_active = Column(Boolean, nullable=False, default=True)
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    is_exported = Column(Boolean, default=False, nullable=False, index=True)
     last_used_at = Column(DateTime)
 
 class DonationLog(Base):
@@ -87,10 +89,18 @@ class DonationLog(Base):
     quantity_duplicate = Column(Integer, nullable=False, default=0)
     file_path = Column(String, nullable=True)
 
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, nullable=False, unique=True, index=True)
+    last_donation_at = Column(DateTime, nullable=True)
+
 class DatabaseManager:
     def __init__(self, config: dict):
         self.engine = async_engine
         self.config = config
+        # 从配置中读取捐赠冷却时间，如果未设置则默认为1小时
+        self.donation_cooldown_hours = self.config.get('bot_settings', {}).get('donation_cooldown_hours', 1)
 
     def _run_migrations(self, connection):
         """
@@ -368,6 +378,13 @@ class DatabaseManager:
             logger.error(f"数据库备份失败: {e}", exc_info=True)
             return False
 
+    async def get_all_gemini_key_values(self) -> Set[str]:
+        """获取数据库中所有 GeminiKey 的字符串值。"""
+        async with AsyncSessionLocal() as session:
+            stmt = select(GeminiKey.key)
+            result = await session.execute(stmt)
+            return set(result.scalars().all())
+
     async def add_gemini_keys(self, keys: List[str], donator_user_id: int) -> Tuple[int, int]:
         """
         向数据库批量添加 Gemini 密钥，并自动处理重复。
@@ -436,3 +453,76 @@ class DatabaseManager:
             )
             result = await session.execute(stmt)
             return result.scalars().all()
+
+    async def check_and_update_donation_cooldown(self, user_id: int) -> Tuple[bool, Optional[timedelta]]:
+        """
+        检查并更新用户的捐赠冷却时间。
+        :return: 一个元组 (是否允许捐赠, 剩余冷却时间 or None)
+        """
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # 查找或创建用户
+                stmt = select(User).filter_by(user_id=user_id)
+                result = await session.execute(stmt)
+                user = result.scalar_one_or_none()
+
+                if not user:
+                    user = User(user_id=user_id)
+                    session.add(user)
+                
+                # 检查冷却时间
+                now = datetime.utcnow()
+                if user.last_donation_at:
+                    cooldown_duration = timedelta(hours=self.donation_cooldown_hours)
+                    time_since_last_donation = now - user.last_donation_at
+                    if time_since_last_donation < cooldown_duration:
+                        remaining_cooldown = cooldown_duration - time_since_last_donation
+                        return False, remaining_cooldown
+
+                # 更新捐赠时间并允许捐赠
+                user.last_donation_at = now
+                return True, None
+
+    async def export_all_active_gemini_keys(self) -> List[str]:
+        """
+        【全量导出】
+        导出数据库中所有 is_active=True 的 Gemini 密钥，无论其是否已被导出过。
+        """
+        async with AsyncSessionLocal() as session:
+            stmt = select(GeminiKey.key).where(GeminiKey.is_active == True).order_by(GeminiKey.donated_at)
+            result = await session.execute(stmt)
+            return result.scalars().all()
+
+    async def export_new_gemini_keys_and_mark_as_exported(self) -> List[str]:
+        """
+        【增量导出】
+        导出所有 is_active=True 且 is_exported=False 的密钥，并在导出后将它们标记为 is_exported=True。
+        这是一个事务性操作，确保数据一致性。
+        """
+        async with AsyncSessionLocal() as session:
+            async with session.begin():
+                # 1. 找出所有新的、可用的密钥
+                select_stmt = (
+                    select(GeminiKey)
+                    .where(GeminiKey.is_active == True, GeminiKey.is_exported == False)
+                    .order_by(GeminiKey.donated_at)
+                )
+                result = await session.execute(select_stmt)
+                keys_to_export = result.scalars().all()
+
+                if not keys_to_export:
+                    return []
+
+                key_values = [k.key for k in keys_to_export]
+                key_ids = [k.id for k in keys_to_export]
+
+                # 2. 将这些密钥标记为已导出
+                update_stmt = (
+                    update(GeminiKey)
+                    .where(GeminiKey.id.in_(key_ids))
+                    .values(is_exported=True)
+                )
+                await session.execute(update_stmt)
+
+            # 3. 返回密钥列表
+            return key_values

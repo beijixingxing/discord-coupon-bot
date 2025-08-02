@@ -102,7 +102,7 @@ class Admin(commands.Cog):
             success, message = await self.admin_cog.bot.db_manager.create_project(project_name)
             if success:
                 await interaction.response.send_message(f"✅ {message}", ephemeral=True)
-                await self.admin_cog.bot.update_project_cache()
+                await self.admin_cog.bot.force_update_project_cache()
             else:
                 await interaction.response.send_message(f"❌ {message}", ephemeral=True)
 
@@ -125,7 +125,7 @@ class Admin(commands.Cog):
             await self._disable_and_stop(interaction, f"正在删除项目 **{self.project_name}**...")
             success, message = await self.admin_cog.bot.db_manager.delete_project(self.project_name)
             if success:
-                await self.admin_cog.bot.update_project_cache()
+                await self.admin_cog.bot.force_update_project_cache()
                 self.admin_cog.bot.invalidate_stock_cache(self.project_name)
                 await interaction.followup.send(f"✅ {message}", ephemeral=True)
             else:
@@ -220,6 +220,55 @@ class Admin(commands.Cog):
                           expiry_days: Option(int, "兑换券有效期天数（留空则为永久）。", min_value=1, required=False)):
         await ctx.defer(ephemeral=True)
         await self._process_add_coupons(ctx.interaction, project, file, expiry_days)
+
+    @admin.command(name="导出密钥", description="导出Gemini API密钥。")
+    async def export_keys(self, ctx: discord.ApplicationContext,
+        模式: Option(str, "导出模式: '新增' (仅新的) 或 '全部' (所有活跃的)。", choices=["新增", "全部"], default="新增")):
+        """
+        从数据库导出 Gemini 密钥到一个文本文件。
+        支持两种模式:
+        - '新增': (默认) 只导出上次导出后新增的密钥，并将其标记为已导出。
+        - '全部': 导出所有状态为活跃的密钥，无论之前是否导出过。
+        """
+        await ctx.defer(ephemeral=True)
+        
+        try:
+            keys_to_export = []
+            export_mode_text = ""
+            file_mode_tag = "new"
+
+            if 模式 == '新增':
+                keys_to_export = await self.bot.db_manager.export_new_gemini_keys_and_mark_as_exported()
+                export_mode_text = "增量导出（仅新密钥）"
+                file_mode_tag = "new"
+            else: # 模式 == '全部'
+                keys_to_export = await self.bot.db_manager.export_all_active_gemini_keys()
+                export_mode_text = "全量导出（所有活跃密钥）"
+                file_mode_tag = "all"
+
+            if not keys_to_export:
+                await ctx.followup.send(f"✅ **{export_mode_text}** 完成：没有找到符合条件的密钥。", ephemeral=True)
+                return
+
+            keys_str = "\n".join(keys_to_export)
+            keys_bytes = keys_str.encode('utf-8')
+            
+            timestamp = datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')
+            file = discord.File(
+                io.BytesIO(keys_bytes),
+                filename=f"gemini_keys_{file_mode_tag}_{timestamp}.txt"
+            )
+            
+            await ctx.followup.send(
+                f"✅ **{export_mode_text}** 成功！\n"
+                f"共导出 **{len(keys_to_export)}** 个 Gemini API 密钥。",
+                file=file,
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logger.error(f"导出密钥时发生意外错误: {e}", exc_info=True)
+            await ctx.followup.send("🚫 导出密钥时发生未知内部错误，请检查日志。", ephemeral=True)
 
     # --- Settings Commands ---
     async def _process_toggle_claim(self, interaction: discord.Interaction, project_name: str, new_status: bool):

@@ -83,52 +83,101 @@ class Donation(commands.Cog):
         """
         处理捐赠的核心逻辑，返回一个用于反馈的 Embed。
         """
+        # --- 1. 检查捐赠冷却 ---
+        can_donate, remaining_cooldown = await self.db_manager.check_and_update_donation_cooldown(interaction.user.id)
+        if not can_donate and remaining_cooldown:
+            # 从配置中动态获取冷却时间
+            cooldown_hours = self.bot.config.get('bot_settings', {}).get('donation_cooldown_hours', 1)
+            minutes, seconds = divmod(int(remaining_cooldown.total_seconds()), 60)
+            embed = discord.Embed(
+                title="操作过于频繁",
+                description=f"您在最近 {cooldown_hours} 小时内已经捐赠过了，请在 **{minutes}分钟 {seconds}秒** 后再试。感谢您的慷慨！",
+                color=discord.Color.orange()
+            )
+            return embed
+
+        # --- 2. 提取和验证密钥 ---
         if not all_potential_keys:
             return EmbedFactory.warning("操作提醒", "未能从您的输入中找到任何内容。")
 
         valid_keys = self._filter_and_clean_keys(all_potential_keys)
-        
+      
         if not valid_keys:
             return EmbedFactory.info("感谢您的心意", "但在您提供的内容中未能找到有效格式的Gemini API密钥。")
 
-        quantity_new, quantity_duplicate = await self.db_manager.add_gemini_keys(
-            keys=list(valid_keys),
-            donator_user_id=interaction.user.id
-        )
+        # --- 3. 与数据库对比，分离新旧密钥 ---
+        existing_keys_in_db = await self.db_manager.get_all_gemini_key_values()
+        new_keys_to_add = valid_keys - existing_keys_in_db
+        duplicate_keys = valid_keys.intersection(existing_keys_in_db)
+        quantity_new = len(new_keys_to_add)
+        quantity_duplicate = len(duplicate_keys)
+
+        # --- 4. 将新密钥存入数据库 ---
+        if quantity_new > 0:
+            await self.db_manager.add_gemini_keys(
+                keys=list(new_keys_to_add),
+                donator_user_id=interaction.user.id
+            )
 
         total_found = len(all_potential_keys)
         total_valid = len(valid_keys)
         total_ignored = total_found - total_valid
 
+        # --- 5. 创建本次捐赠的单独日志文件 ---
         utc_now = datetime.now(timezone.utc)
         beijing_tz = ZoneInfo('Asia/Shanghai')
         beijing_now = utc_now.astimezone(beijing_tz)
-        
-        filename = f"{utc_now.strftime('%Y-%m-%d_%H-%M-%S')}_{interaction.user.id}.txt"
+      
+        # --- [修正] 更可靠地获取用户昵称和用户名 ---
+        # 优先使用服务器内的 Member 对象，如果不在服务器内则回退到 User 对象
+        if interaction.guild:
+            # 尝试从服务器成员列表中获取，以确保数据最新
+            member = interaction.guild.get_member(interaction.user.id) or interaction.user
+        else:
+            member = interaction.user
+      
+        user_display_name = member.display_name
+        user_name = member.name
+      
+        # --- [修正] 创建新的、符合要求的文件名 ---
+        # 1. 清理昵称，使其适用于文件名
+        safe_display_name = re.sub(r'[\\/*?:"<>|]', "", user_display_name).replace(" ", "_")[:50]
+        # 2. 使用新的时间格式
+        timestamp_str = beijing_now.strftime('%Y-%m-%d_%H-%M')
+        # 3. 组合成新文件名
+        filename = f"{timestamp_str}_{safe_display_name}.txt"
         filepath = os.path.join(DONATION_DIR, filename)
-        
+      
+        # --- [修正] 使用正确获取到的昵称和用户名写入文件头 ---
+        logger.info(f"正在创建本次捐赠的日志文件: {filepath}")
         with open(filepath, 'w', encoding='utf-8') as f:
             header = (
                 f"# 日期时间: {beijing_now.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
-                f"# 昵称: {interaction.user.display_name}\n"
-                f"# 用户名: {interaction.user.name}\n"
-                f"# ID: {interaction.user.id}\n"
+                f"# 捐赠者信息\n"
+                f"# 昵称 (Display Name): {user_display_name}\n"
+                f"# 用户名 (Username): {user_name}\n"
+                f"# 用户ID (User ID): {interaction.user.id}\n"
                 f"# 捐赠数量 (新增/重复): {quantity_new} / {quantity_duplicate}\n"
                 f"# ---------------------------------------\n"
             )
             f.write(header)
             for key in sorted(list(valid_keys)):
                 f.write(f"{key}\n")
+        logger.info("捐赠日志文件创建成功。")
 
+        # --- 6. [修正] 使用正确的用户昵称和用户名记录到数据库 ---
         await self.db_manager.log_donation(
             user_id=interaction.user.id,
-            user_name=interaction.user.name,
-            user_display_name=interaction.user.display_name,
+            user_name=user_name,
+            user_display_name=user_display_name,
             quantity_new=quantity_new,
             quantity_duplicate=quantity_duplicate,
             file_path=filepath
         )
-        
+
+        # --- 7. [已移除] 不再将Key写入总汇文件，数据库是唯一的数据源 ---
+
+        # --- 8. 构建用户反馈 ---
         if quantity_new == 0 and quantity_duplicate > 0:
             description = (
                 "我们检查后发现，您提供的所有有效密钥都已经是我们库存的一部分了。\n\n"
@@ -143,18 +192,34 @@ class Donation(commands.Cog):
                 f"• **发现已存在的密钥**: **{quantity_duplicate}** 个\n"
                 f"• **忽略格式无效内容**: **{total_ignored}** 个"
             )
-        
-        # 在后台任务中发送公开感谢信，避免阻塞当前交互
+      
         self.bot.loop.create_task(self._send_public_announcement(interaction, quantity_new, quantity_duplicate))
-        
+      
         return EmbedFactory.success("捐赠成功！", description)
 
-    @commands.slash_command(name="捐赠", description="通过文本或文件捐赠API密钥。")
+    @commands.slash_command(
+        name="donate",
+        description="Donate API keys via text or file.",
+        name_localizations={'zh-CN': '捐赠'},
+        description_localizations={'zh-CN': '通过文本或文件捐赠API密钥。'}
+    )
     async def unified_donate(
         self,
         ctx: discord.ApplicationContext,
-        text: Option(str, "粘贴包含一个或多个密钥的文本。", required=False),
-        file: Option(discord.Attachment, "上传包含密钥的.txt或.zip文件。", required=False)
+        text: Option(
+            str,
+            "Paste the text containing one or more keys.",
+            name_localizations={'zh-CN': '文本'},
+            description_localizations={'zh-CN': '粘贴包含一个或多个密钥的文本。'},
+            required=False
+        ),
+        file: Option(
+            discord.Attachment,
+            "Upload a .txt or .zip file containing the keys.",
+            name_localizations={'zh-CN': '文件'},
+            description_localizations={'zh-CN': '上传包含密钥的.txt或.zip文件。'},
+            required=False
+        )
     ):
         """统一处理来自文本或文件的密钥捐赠。"""
         await ctx.defer(ephemeral=True)
@@ -188,6 +253,20 @@ class Donation(commands.Cog):
             logger.error(f"处理捐赠命令时发生意外错误: {e}", exc_info=True)
             await ctx.followup.send("🚫 处理您的捐赠时发生了一个未知的内部错误，管理员已收到通知。", ephemeral=True)
 
+    async def process_text_donation(self, interaction: discord.Interaction, raw_text: str):
+        """
+        公开的接口，用于处理来自UI（如Modal）的纯文本捐赠。
+        """
+        # 注意：这个方法现在负责 defer 和 followup
+        # await interaction.response.defer(ephemeral=True, thinking=True) # defer 由调用方处理
+        try:
+            keys = self._parse_raw_text(raw_text)
+            result_embed = await self._process_donation(interaction, keys)
+            await interaction.followup.send(embed=result_embed, ephemeral=True)
+        except Exception as e:
+            logger.error(f"处理文本捐赠时出错: {e}", exc_info=True)
+            await interaction.followup.send("🚫 处理您的捐赠时发生了一个未知的内部错误。", ephemeral=True)
+
     async def _send_public_announcement(self, interaction: discord.Interaction, new_count: int, duplicate_count: int):
         """如果配置开启，则发送公开的感谢公告。"""
         config = self.bot.config.get('bot_settings', {}).get('donation_announcement', {})
@@ -205,10 +284,20 @@ class Donation(commands.Cog):
         # --- 构建 Embed ---
         def format_string(text: Optional[str]) -> str:
             if not text: return ""
+            
+            # 智能格式化：如果用户在模板中使用了 {user_mention}，
+            # 则自动将其他可能重复的用户信息置空，以避免冗余。
+            if '{user_mention}' in text:
+                display_name = ""
+                user_name = ""
+            else:
+                display_name = interaction.user.display_name
+                user_name = interaction.user.name
+
             return text.format(
                 user_mention=interaction.user.mention,
-                user_name=interaction.user.name,
-                user_display_name=interaction.user.display_name,
+                user_name=user_name,
+                user_display_name=display_name,
                 new_count=new_count,
                 duplicate_count=duplicate_count
             )

@@ -151,20 +151,10 @@ class CouponBot(discord.Bot):
         except Exception as e:
             logger.error(f"在向用户报告错误时，又发生了新的错误: {e}", exc_info=True)
           
-    @tasks.loop(minutes=5)
-    async def update_project_cache(self):
+    async def force_update_project_cache(self):
+        """强制立即从数据库更新项目缓存。"""
         self.project_cache = await self.db_manager.get_all_project_names()
-        logger.info(f"项目缓存已更新，共 {len(self.project_cache)} 个项目。")
-
-    @update_project_cache.error
-    async def on_project_cache_error(self, error):
-        logger.error(f"更新项目缓存任务出错: {error}", exc_info=True)
-
-    @update_project_cache.before_loop
-    async def before_update_cache(self):
-        logger.info("等待机器人就绪以启动缓存循环...")
-        await self.wait_until_ready()
-        logger.info("机器人已就绪。缓存更新循环启动。")
+        logger.info(f"项目缓存已强制更新，共 {len(self.project_cache)} 个项目。")
 
     async def on_ready(self):
         if self.user:
@@ -177,7 +167,8 @@ class CouponBot(discord.Bot):
         await self.db_manager.connect()
       
         logger.info("正在启动所有后台任务...")
-        self.update_project_cache.start()
+        # 项目缓存现在是事件驱动的，不再需要定时任务
+        # self.update_project_cache.start()
         self.auto_backup.start()
         self.cleanup_expired_coupons.start()
         logger.info("所有后台任务已成功启动。")
